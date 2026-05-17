@@ -12,7 +12,7 @@
 #define WATCHDOG_REC_HEARTBEAT 2u  /* 1-second keepalive        */
 
 /* Fixed-size telemetry record emitted on COM2.
- * 44 bytes packed. Python struct format: '<IHHQBxxxIII16s' */
+ * 44 bytes packed. Python struct format: '<IHHQBxxxII16s' */
 typedef struct __attribute__((packed)) {
     uint32_t magic;           /* WATCHDOG_MAGIC                       */
     uint16_t version;         /* WATCHDOG_TELEMETRY_VERSION           */
