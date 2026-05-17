@@ -116,7 +116,7 @@ static int enqueue_incoming(int sock_id, nng_msg_t *msg) {
     if (q->count >= MAX_QUEUED_MSGS)
         return NNG_ENOMEM;
     q->messages[q->tail] = msg;
-    q->tail = (q->tail + 1) % MAX_QUEUED_MSGS;
+    q->tail = (q->tail + 1) & (MAX_QUEUED_MSGS - 1);
     q->count++;
     return NNG_OK;
 }
@@ -400,9 +400,10 @@ int nng_send(nng_socket_t *sock, nng_msg_t *msg, int flags) {
     case NNG_PROTO_PUSH0: {
         n = collect_peers(id, NNG_PROTO_PULL0, peers, MAX_SOCKETS);
         if (n == 0) { rv = NNG_ENOTSUP; break; }
-        int idx = sock_state[id].rr_idx % n;
+        int idx = sock_state[id].rr_idx;
+        if (idx < 0 || idx >= n) idx = 0;
         rv = deliver_copy(peers[idx], msg);
-        sock_state[id].rr_idx = (idx + 1) % n;
+        sock_state[id].rr_idx = (idx + 1 >= n) ? 0 : idx + 1;
         break;
     }
 
@@ -410,12 +411,13 @@ int nng_send(nng_socket_t *sock, nng_msg_t *msg, int flags) {
     case NNG_PROTO_REQ0: {
         n = collect_peers(id, NNG_PROTO_REP0, peers, MAX_SOCKETS);
         if (n == 0) { rv = NNG_ENOTSUP; break; }
-        int idx   = sock_state[id].rr_idx % n;
+        int idx = sock_state[id].rr_idx;
+        if (idx < 0 || idx >= n) idx = 0;
         int rep_id = peers[idx];
         rv = deliver_copy(rep_id, msg);
         if (rv == NNG_OK) {
             sock_state[rep_id].reply_src = id;
-            sock_state[id].rr_idx = (idx + 1) % n;
+            sock_state[id].rr_idx = (idx + 1 >= n) ? 0 : idx + 1;
         }
         break;
     }
@@ -508,7 +510,7 @@ int nng_recv(nng_socket_t *sock, nng_msg_t **msgp, int flags) {
 
     *msgp = q->messages[q->head];
     q->messages[q->head] = NULL;
-    q->head = (q->head + 1) % MAX_QUEUED_MSGS;
+    q->head = (q->head + 1) & (MAX_QUEUED_MSGS - 1);
     q->count--;
     return NNG_OK;
 }

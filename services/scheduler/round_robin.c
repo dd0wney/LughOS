@@ -50,7 +50,7 @@ static int rr_schedule(task_t *tasks, int num_tasks, uint32_t *next_task_id) {
     /* Advance cursor, scanning up to n slots for the next READY task */
     int checked;
     for (checked = 0; checked < n; checked++) {
-        rr_cursor = (rr_cursor + 1) % n;
+        rr_cursor = (rr_cursor + 1 >= n) ? 0 : rr_cursor + 1;
         if (t[rr_cursor].state == (uint64_t)TASK_READY) {
             t[rr_cursor].state = TASK_RUNNING;
             *next_task_id = t[rr_cursor].task_id;

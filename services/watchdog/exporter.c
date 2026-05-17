@@ -13,7 +13,8 @@
 ipc_ring_t       ipc_ring;
 volatile uint8_t watchdog_enabled = 0;
 
-static uint64_t tick_count = 0;
+static uint64_t tick_count       = 0;
+static uint32_t heartbeat_counter = 0;
 
 /* ── COM2 helpers ────────────────────────────────────────────────── */
 
@@ -180,6 +181,9 @@ void watchdog_tick(void) {
     }
 
     tick_count++;
-    if (((uint32_t)tick_count % 100u) == 0u)
+    heartbeat_counter++;
+    if (heartbeat_counter >= 100u) {
         emit_heartbeat_record();
+        heartbeat_counter = 0;
+    }
 }
