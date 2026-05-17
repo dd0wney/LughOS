@@ -14,6 +14,7 @@
 
 // Forward declarations
 void test_nng(void);
+void test_nng_patterns(void);
 void test_energy_grid_alert(void);
 void test_update_system(void);
 void test_watchdog(void);
@@ -258,6 +259,159 @@ void test_watchdog(void) {
     log_message(LOG_INFO, "Watchdog test: record emitted (check /tmp/lugh_ipc.bin)\n");
 }
 
+/* Plain byte comparison — avoids pulling in a memcmp declaration. */
+static int nng_test_body_eq(const nng_msg_t *m, const char *want, int len) {
+    if (nng_msg_len(m) != len) return 0;
+    const uint8_t *b = (const uint8_t *)nng_msg_body(m);
+    const uint8_t *w = (const uint8_t *)want;
+    for (int i = 0; i < len; i++)
+        if (b[i] != w[i]) return 0;
+    return 1;
+}
+
+/* Smoke-tests for all three core NNG patterns: PUB/SUB, PUSH/PULL, REQ/REP.
+ * Each sub-test creates sockets, wires them with nng_connect, exercises the
+ * routing behaviour, and asserts the outcome. Uses a simple EXPECT macro that
+ * increments pass/fail counters and logs the label on failure. */
+void test_nng_patterns(void) {
+    log_message(LOG_INFO, "Testing NNG messaging patterns...\n");
+    int pass = 0, fail = 0;
+
+#define EXPECT(cond, label) \
+    do { if (cond) { pass++; } \
+         else { log_message(LOG_ERROR, "NNG FAIL: %s\n", (label)); fail++; } \
+    } while (0)
+
+    nng_msg_t *msg;
+    nng_msg_t *rx;
+    int rv;
+
+    /* ── 1. PUB/SUB: topic prefix filtering ─────────────────────────── */
+    {
+        nng_socket_t pub, sub;
+        EXPECT(nng_socket_create(&pub, NNG_PROTO_PUB0) == NNG_OK, "pub create");
+        EXPECT(nng_socket_create(&sub, NNG_PROTO_SUB0) == NNG_OK, "sub create");
+        EXPECT(nng_connect(&pub, &sub)               == NNG_OK, "pub->sub connect");
+        EXPECT(nng_sub_subscribe(&sub, "GRID:", 5)   == NNG_OK, "sub subscribe GRID:");
+
+        /* matching message — body starts with "GRID:" */
+        rv = nng_msg_alloc(&msg, 0);
+        if (rv == NNG_OK) {
+            nng_msg_append(msg, "GRID:alert1", 11);
+            EXPECT(nng_send(&pub, msg, 0) == NNG_OK, "pub send matching");
+        }
+
+        /* non-matching — should be filtered at the SUB socket */
+        rv = nng_msg_alloc(&msg, 0);
+        if (rv == NNG_OK) {
+            nng_msg_append(msg, "OTHER:msg", 9);
+            nng_send(&pub, msg, 0);
+        }
+
+        /* only the matching message arrives */
+        rv = nng_recv(&sub, &rx, 1);
+        EXPECT(rv == NNG_OK, "sub recv matching msg");
+        if (rv == NNG_OK) {
+            EXPECT(nng_test_body_eq(rx, "GRID:alert1", 11),
+                   "sub body == GRID:alert1");
+            nng_msg_free(rx);
+        }
+
+        /* second recv must time out — non-matching was filtered */
+        EXPECT(nng_recv(&sub, &rx, 1) == NNG_ETIMEDOUT, "sub queue empty after filter");
+
+        nng_socket_close(&pub);
+        nng_socket_close(&sub);
+    }
+
+    /* ── 2. PUSH/PULL: round-robin across two pullers ────────────────── */
+    {
+        nng_socket_t push, pull0, pull1;
+        EXPECT(nng_socket_create(&push,  NNG_PROTO_PUSH0) == NNG_OK, "push create");
+        EXPECT(nng_socket_create(&pull0, NNG_PROTO_PULL0) == NNG_OK, "pull0 create");
+        EXPECT(nng_socket_create(&pull1, NNG_PROTO_PULL0) == NNG_OK, "pull1 create");
+        EXPECT(nng_connect(&push, &pull0) == NNG_OK, "push->pull0");
+        EXPECT(nng_connect(&push, &pull1) == NNG_OK, "push->pull1");
+
+        rv = nng_msg_alloc(&msg, 0);
+        if (rv == NNG_OK) { nng_msg_append(msg, "work0", 5); nng_send(&push, msg, 0); }
+        rv = nng_msg_alloc(&msg, 0);
+        if (rv == NNG_OK) { nng_msg_append(msg, "work1", 5); nng_send(&push, msg, 0); }
+
+        rv = nng_recv(&pull0, &rx, 1);
+        EXPECT(rv == NNG_OK, "pull0 recv");
+        if (rv == NNG_OK) {
+            EXPECT(nng_test_body_eq(rx, "work0", 5),
+                   "pull0 body == work0");
+            nng_msg_free(rx);
+        }
+
+        rv = nng_recv(&pull1, &rx, 1);
+        EXPECT(rv == NNG_OK, "pull1 recv");
+        if (rv == NNG_OK) {
+            EXPECT(nng_test_body_eq(rx, "work1", 5),
+                   "pull1 body == work1");
+            nng_msg_free(rx);
+        }
+
+        EXPECT(nng_recv(&pull0, &rx, 1) == NNG_ETIMEDOUT, "pull0 empty after rr");
+        EXPECT(nng_recv(&pull1, &rx, 1) == NNG_ETIMEDOUT, "pull1 empty after rr");
+
+        nng_socket_close(&push);
+        nng_socket_close(&pull0);
+        nng_socket_close(&pull1);
+    }
+
+    /* ── 3. REQ/REP: request-reply round-trip ────────────────────────── */
+    {
+        nng_socket_t req, rep;
+        EXPECT(nng_socket_create(&req, NNG_PROTO_REQ0) == NNG_OK, "req create");
+        EXPECT(nng_socket_create(&rep, NNG_PROTO_REP0) == NNG_OK, "rep create");
+        EXPECT(nng_connect(&req, &rep) == NNG_OK, "req->rep connect");
+
+        rv = nng_msg_alloc(&msg, 0);
+        if (rv == NNG_OK) {
+            nng_msg_append(msg, "ping", 4);
+            EXPECT(nng_send(&req, msg, 0) == NNG_OK, "req send ping");
+        }
+
+        rv = nng_recv(&rep, &rx, 1);
+        EXPECT(rv == NNG_OK, "rep recv ping");
+        if (rv == NNG_OK) {
+            EXPECT(nng_test_body_eq(rx, "ping", 4),
+                   "rep body == ping");
+            nng_msg_free(rx);
+        }
+
+        rv = nng_msg_alloc(&msg, 0);
+        if (rv == NNG_OK) {
+            nng_msg_append(msg, "pong", 4);
+            EXPECT(nng_send(&rep, msg, 0) == NNG_OK, "rep send pong");
+        }
+
+        rv = nng_recv(&req, &rx, 1);
+        EXPECT(rv == NNG_OK, "req recv pong");
+        if (rv == NNG_OK) {
+            EXPECT(nng_test_body_eq(rx, "pong", 4),
+                   "req body == pong");
+            nng_msg_free(rx);
+        }
+
+        nng_socket_close(&req);
+        nng_socket_close(&rep);
+    }
+
+#undef EXPECT
+
+    if (fail == 0)
+        log_message(LOG_INFO,
+                    "NNG pattern tests: PASS (%d/%d)\n", pass, pass);
+    else
+        log_message(LOG_ERROR,
+                    "NNG pattern tests: %d FAILED (%d/%d passed)\n",
+                    fail, pass, pass + fail);
+}
+
 /**
  * @brief Initialize the kernel and its subsystems
  * 
@@ -327,6 +481,7 @@ void kmain(void) {
     test_nng();
     test_energy_grid_alert();
     test_watchdog();
+    test_nng_patterns();
     
     // Test the update system
     test_update_system();
