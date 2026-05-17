@@ -37,6 +37,7 @@ typedef struct nng_socket {
 #define NNG_ETIMEDOUT 4
 #define NNG_ENOTSUP   5
 #define NNG_ENOENT    6
+#define NNG_EACCESS   7  /* permission denied (capability/domain check) */
 
 /* ── Protocol types ───────────────────────────────────────────── */
 #define NNG_PROTO_PAIR1       1   /* exclusive 1:1 bidirectional       */

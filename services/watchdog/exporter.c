@@ -5,10 +5,9 @@
 
 /* COM2 serial port base address (0x2F8) for dedicated telemetry stream */
 #define COM2_PORT  0x2F8u
-#define COM2_LSR   (COM2_PORT + 5u)   /* Line Status Register */
-#define COM2_THR_EMPTY 0x20u          /* bit 5: transmit holding register empty */
+#define COM2_LSR   (COM2_PORT + 5u)
+#define COM2_THR_EMPTY 0x20u
 
-/* Max messages drained per watchdog_tick() to avoid starving other events */
 #define DRAIN_BATCH 32u
 
 ipc_ring_t       ipc_ring;
@@ -19,20 +18,19 @@ static uint64_t tick_count = 0;
 /* ── COM2 helpers ────────────────────────────────────────────────── */
 
 static void com2_init(void) {
-    outb(COM2_PORT + 1, 0x00);   /* disable interrupts */
-    outb(COM2_PORT + 3, 0x80);   /* enable DLAB (baud divisor) */
-    outb(COM2_PORT + 0, 0x03);   /* divisor low  → 38400 baud */
-    outb(COM2_PORT + 1, 0x00);   /* divisor high */
-    outb(COM2_PORT + 3, 0x03);   /* 8N1, disable DLAB */
-    outb(COM2_PORT + 2, 0xC7);   /* enable FIFO, clear, 14-byte threshold */
-    outb(COM2_PORT + 4, 0x0B);   /* RTS/DSR set */
+    outb(COM2_PORT + 1, 0x00);
+    outb(COM2_PORT + 3, 0x80);
+    outb(COM2_PORT + 0, 0x03);
+    outb(COM2_PORT + 1, 0x00);
+    outb(COM2_PORT + 3, 0x03);
+    outb(COM2_PORT + 2, 0xC7);
+    outb(COM2_PORT + 4, 0x0B);
 }
 
 static void com2_write_bytes(const void *buf, uint32_t len) {
     const uint8_t *p = (const uint8_t *)buf;
     uint32_t i;
     for (i = 0; i < len; i++) {
-        /* Spin until THR empty — QEMU always returns ready immediately */
         while (!(inb(COM2_LSR) & COM2_THR_EMPTY))
             ;
         outb(COM2_PORT, p[i]);
@@ -50,7 +48,7 @@ static void payload_fingerprint(const char *payload, uint8_t out[16]) {
         uint32_t h = seeds[i];
         for (j = 0; j < MAX_MSG_SIZE && payload[j] != '\0'; j++) {
             h ^= (uint8_t)payload[j];
-            h *= 16777619UL;   /* FNV prime for 32-bit */
+            h *= 16777619UL;
         }
         out[i * 4u + 0u] = (uint8_t)(h);
         out[i * 4u + 1u] = (uint8_t)(h >> 8);
@@ -59,16 +57,26 @@ static void payload_fingerprint(const char *payload, uint8_t out[16]) {
     }
 }
 
+/* ── Shared record header init ───────────────────────────────────── */
+
+static void init_record(watchdog_record_t *rec, uint16_t type) {
+    rec->magic       = WATCHDOG_MAGIC;
+    rec->version     = WATCHDOG_TELEMETRY_VERSION;
+    rec->record_type = type;
+    rec->jiffies     = hw_get_jiffies();
+}
+
 /* ── Record emission ─────────────────────────────────────────────── */
 
+/* msg._padding1 was stamped in ipc_send with [channel_id:8][domain:8][protocol:8][0:8].
+ * Unpack it here so MSG records carry source identity without resizing message_t. */
 static void emit_msg_record(const message_t *msg) {
     watchdog_record_t rec;
-    rec.magic       = WATCHDOG_MAGIC;
-    rec.version     = WATCHDOG_TELEMETRY_VERSION;
-    rec.record_type = WATCHDOG_REC_MSG;
-    rec.jiffies     = hw_get_jiffies();
+    init_record(&rec, WATCHDOG_REC_MSG);
     rec.priority    = (uint8_t)msg->priority;
-    rec._pad[0] = rec._pad[1] = rec._pad[2] = 0;
+    rec.channel_id  = (uint8_t)( msg->_padding1        & 0xFFu);
+    rec.src_domain  = (uint8_t)((msg->_padding1 >>  8) & 0xFFu);
+    rec.protocol    = (uint8_t)((msg->_padding1 >> 16) & 0xFFu);
     rec.operation   = msg->operation;
     rec.checksum    = msg->checksum;
     payload_fingerprint(msg->payload, rec.payload_hash);
@@ -77,14 +85,13 @@ static void emit_msg_record(const message_t *msg) {
 
 static void emit_overflow_record(uint32_t dropped) {
     watchdog_record_t rec;
-    rec.magic       = WATCHDOG_MAGIC;
-    rec.version     = WATCHDOG_TELEMETRY_VERSION;
-    rec.record_type = WATCHDOG_REC_OVERFLOW;
-    rec.jiffies     = hw_get_jiffies();
-    rec.priority    = 0;
-    rec._pad[0] = rec._pad[1] = rec._pad[2] = 0;
-    rec.operation   = dropped;   /* reuse field to carry drop count */
-    rec.checksum    = 0;
+    init_record(&rec, WATCHDOG_REC_OVERFLOW);
+    rec.priority   = 0;
+    rec.src_domain = 0;
+    rec.protocol   = 0;
+    rec.channel_id = 0;
+    rec.operation  = dropped;
+    rec.checksum   = 0;
     uint32_t i;
     for (i = 0; i < 16u; i++) rec.payload_hash[i] = 0;
     com2_write_bytes(&rec, sizeof(rec));
@@ -92,16 +99,55 @@ static void emit_overflow_record(uint32_t dropped) {
 
 static void emit_heartbeat_record(void) {
     watchdog_record_t rec;
-    rec.magic       = WATCHDOG_MAGIC;
-    rec.version     = WATCHDOG_TELEMETRY_VERSION;
-    rec.record_type = WATCHDOG_REC_HEARTBEAT;
-    rec.jiffies     = hw_get_jiffies();
-    rec.priority    = 0;
-    rec._pad[0] = rec._pad[1] = rec._pad[2] = 0;
-    rec.operation   = 0;
-    rec.checksum    = 0;
+    init_record(&rec, WATCHDOG_REC_HEARTBEAT);
+    rec.priority   = 0;
+    rec.src_domain = 0;
+    rec.protocol   = 0;
+    rec.channel_id = 0;
+    rec.operation  = 0;
+    rec.checksum   = 0;
     uint32_t i;
     for (i = 0; i < 16u; i++) rec.payload_hash[i] = 0;
+    com2_write_bytes(&rec, sizeof(rec));
+}
+
+/* ── DENY record emission ────────────────────────────────────────── */
+
+void watchdog_deny(const watchdog_deny_info_t *info) {
+    if (!watchdog_enabled || !info)
+        return;
+
+    watchdog_record_t rec;
+    init_record(&rec, WATCHDOG_REC_DENY);
+
+    rec.priority   = info->priority;
+    rec.src_domain = info->src_domain;
+    rec.protocol   = info->protocol;
+    rec.channel_id = info->src_channel;
+    rec.operation  = info->operation;
+
+    /* Pack deny context into checksum field:
+     * [reason:8][dst_domain:8][dst_channel:8][reserved:8] */
+    rec.checksum = ((uint32_t)info->reason)
+                 | ((uint32_t)info->dst_domain   << 8)
+                 | ((uint32_t)info->dst_channel  << 16);
+
+    /* payload_hash carries capability diagnostics:
+     * [0..3] granted_caps  [4..7] required_caps
+     * [8..11] dst_channel as full uint32  [12..15] zeros */
+    uint32_t i;
+    uint32_t vals[4];
+    vals[0] = info->granted_caps;
+    vals[1] = info->required_caps;
+    vals[2] = (info->dst_channel == 0xFFu) ? 0xFFFFFFFFu
+                                            : (uint32_t)info->dst_channel;
+    vals[3] = 0u;
+    for (i = 0; i < 4u; i++) {
+        rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
+        rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
+        rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
+        rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
+    }
     com2_write_bytes(&rec, sizeof(rec));
 }
 
@@ -121,13 +167,11 @@ void watchdog_tick(void) {
     if (!watchdog_enabled)
         return;
 
-    /* Report and clear overflow from the previous tick window */
     if (ipc_ring.overflow > 0) {
         emit_overflow_record(ipc_ring.overflow);
         ipc_ring.overflow = 0;
     }
 
-    /* Drain up to DRAIN_BATCH messages per tick */
     message_t msg;
     uint32_t drained = 0;
     while (drained < DRAIN_BATCH && ring_pop(&ipc_ring, &msg)) {
@@ -135,7 +179,6 @@ void watchdog_tick(void) {
         drained++;
     }
 
-    /* Heartbeat every 100 ticks (~1 s at 100 Hz) */
     tick_count++;
     if (((uint32_t)tick_count % 100u) == 0u)
         emit_heartbeat_record();
