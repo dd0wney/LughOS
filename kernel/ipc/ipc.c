@@ -2,6 +2,7 @@
 #include "nngcompat.h"
 #include "security.h"
 #include "crypto.h"
+#include "watchdog.h"
 
 /**
  * Maximum number of IPC channels
@@ -138,6 +139,10 @@ int ipc_send(int channel_id, message_t* msg) {
         return -3;
     }
     
+    /* Observe message on telemetry ring before delivery */
+    if (watchdog_enabled)
+        ring_push(&ipc_ring, msg);
+
     /* Send message */
     rv = nng_send(&channels[channel_id].socket, nng_msg, 0);
     if (rv != NNG_OK) {

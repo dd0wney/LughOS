@@ -52,3 +52,4 @@ cppcheck-report.txt
 cppcheck-report.xml
 cppcheck-report.html
 clang-tidy-*
+.superpowers/

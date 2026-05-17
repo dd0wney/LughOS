@@ -1,6 +1,7 @@
 #include "console.h"
 #include "lugh.h"
 #include "hardware.h"
+#include "watchdog.h"
 
 /**
  * Output a byte to an I/O port
@@ -64,7 +65,7 @@ int hw_detect(void) {
  * Process any pending system events
  */
 void process_events(void) {
-    // TODO: process interrupts, timers, etc.
+    watchdog_tick();
 }
 
 /**

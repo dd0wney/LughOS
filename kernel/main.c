@@ -5,6 +5,7 @@
 #include "nngcompat.h"
 #include "console.h"
 #include "crypto.h"
+#include "watchdog.h"
 #include "transactions.h"
 #include "update.h"
 #include "sandbox.h"
@@ -15,6 +16,10 @@
 void test_nng(void);
 void test_energy_grid_alert(void);
 void test_update_system(void);
+void test_watchdog(void);
+int  init_ipc(void);
+int  ipc_create_channel(uint32_t security_level, uint32_t domain, int protocol);
+int  ipc_send(int channel_id, message_t *msg);
 
 // Define a simple round-robin scheduler for now
 scheduler_ops_t rr_scheduler = {
@@ -234,6 +239,25 @@ void test_update_system(void) {
     }
 }
 
+void test_watchdog(void) {
+    log_message(LOG_INFO, "Testing watchdog telemetry path...\n");
+    int ch = ipc_create_channel(0, 0, NNG_PROTO_PUB0);
+    if (ch < 0) {
+        log_message(LOG_ERROR, "Watchdog test: failed to create IPC channel\n");
+        return;
+    }
+    message_t msg;
+    msg.priority  = PRIORITY_HIGH;
+    msg.operation = 0xDEADBEEFu;
+    msg.checksum  = 0;
+    msg._padding1 = 0;
+    memset(msg.payload, 0, MAX_MSG_SIZE);
+    memcpy(msg.payload, "watchdog-test", 13);
+    ipc_send(ch, &msg);          /* triggers ring_push */
+    watchdog_tick();              /* drains ring → emits telemetry record on COM2 */
+    log_message(LOG_INFO, "Watchdog test: record emitted (check /tmp/lugh_ipc.bin)\n");
+}
+
 /**
  * @brief Initialize the kernel and its subsystems
  * 
@@ -295,12 +319,14 @@ void kmain(void) {
     init_syscall();
 #endif
     
-    // Initialize NNG compatibility layer
-    nng_init();
-    
+    // Initialize IPC subsystem (includes NNG init) and arm watchdog ring
+    init_ipc();
+    watchdog_init();
+
     // Run NNG tests
     test_nng();
     test_energy_grid_alert();
+    test_watchdog();
     
     // Test the update system
     test_update_system();
