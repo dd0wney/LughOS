@@ -17,7 +17,6 @@ typedef struct {
     int id;                   /* Channel ID */
     bool in_use;              /* Whether this channel is active */
     nng_socket_t socket;      /* NNG socket for this channel */
-    priority_queue_t queue;   /* Message queue for this channel */
     uint32_t security_level;  /* Security level for access control */
     uint32_t domain;          /* Domain ID for isolation */
     uint8_t _padding[4];      /* Explicit padding per CERT DCL39-C */
@@ -36,7 +35,6 @@ int init_ipc(void) {
         channels[i].in_use = false;
         channels[i].security_level = 0;
         channels[i].domain = 0;
-        queue_init(&channels[i].queue);
     }
     log_message(LOG_INFO, "IPC subsystem initialized successfully\n");
     return 0;
@@ -72,8 +70,7 @@ int ipc_create_channel(uint32_t security_level, uint32_t domain, int protocol) {
     channels[channel_id].in_use = true;
     channels[channel_id].security_level = security_level;
     channels[channel_id].domain = domain;
-    queue_init(&channels[channel_id].queue);
-    log_message(LOG_INFO, "Created IPC channel %d (security: %u, domain: %u)\n", 
+    log_message(LOG_INFO, "Created IPC channel %d (security: %u, domain: %u)\n",
                 channel_id, security_level, domain);
     return channel_id;
 }
