@@ -22,18 +22,7 @@ int  init_ipc(void);
 int  ipc_create_channel(uint32_t security_level, uint32_t domain, int protocol);
 int  ipc_send(int channel_id, message_t *msg);
 
-// Define a simple round-robin scheduler for now
-scheduler_ops_t rr_scheduler = {
-    .name = "Round Robin",
-    .init = NULL,
-    .schedule = NULL,
-    .add_task = NULL,
-    .remove_task = NULL,
-    .get_state = NULL,
-    .set_state = NULL,
-    .prepare_swap = NULL,
-    .finalize_swap = NULL
-};
+extern scheduler_ops_t rr_scheduler;
 
 // Test NNG messaging functionality
 void test_nng(void) {
@@ -476,6 +465,9 @@ void kmain(void) {
     // Initialize IPC subsystem (includes NNG init) and arm watchdog ring
     init_ipc();
     watchdog_init();
+
+    // Initialize scheduler
+    rr_scheduler.init(NULL);
 
     // Run NNG tests
     test_nng();
