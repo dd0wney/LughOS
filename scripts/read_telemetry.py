@@ -14,6 +14,16 @@ FILE defaults to /tmp/lugh_ipc.bin (QEMU -serial file:/tmp/lugh_ipc.bin).
 --window N groups MSG records into tumbling windows of N entries and
 emits each window as a JSON array suitable for JEPA encoder input.
 Pipe to `jq '.'` for pretty printing or `jq length` to verify window size.
+
+Record schema (44 bytes packed, '<IHHQBBBBII16s'):
+  magic(4) version(2) rec_type(2) jiffies(8)
+  priority(1) src_domain(1) protocol(1) channel_id(1)
+  operation(4) checksum(4) payload_hash(16)
+
+For DENY records (type=3), checksum encodes:
+  [reason:8][dst_domain:8][dst_channel:8][reserved:8]
+  and payload_hash encodes:
+  [granted_caps:32][required_caps:32][dst_channel_id:32][zeros:32]
 """
 
 import argparse
@@ -24,44 +34,93 @@ import time
 
 # Must match watchdog_record_t in include/watchdog.h
 MAGIC       = 0x4C474849  # "LGHI"
-RECORD_FMT  = "<IHHQBxxxII16s"
+RECORD_FMT  = "<IHHQBBBBII16s"
 RECORD_SIZE = struct.calcsize(RECORD_FMT)
 
 assert RECORD_SIZE == 44, f"Format mismatch: expected 44 bytes, got {RECORD_SIZE}"
 
-REC_TYPE_NAME = {0: "MSG", 1: "OVERFLOW", 2: "HEARTBEAT"}
+REC_TYPE_NAME = {0: "MSG", 1: "OVERFLOW", 2: "HEARTBEAT", 3: "DENY"}
 PRIO_NAME     = {0: "HIGH", 1: "MED", 2: "LOW"}
+PROTO_NAME    = {1: "PAIR", 2: "PUB", 3: "SUB", 4: "REQ", 5: "REP",
+                 6: "PUSH", 7: "PULL", 8: "BUS", 9: "SURV", 10: "RESP"}
+DENY_REASON   = {1: "CAP_SEND", 2: "CAP_RECV", 3: "CAP_PRIV", 4: "DOMAIN"}
+
+CAP_NAMES = {0x01: "SEND", 0x02: "RECV", 0x04: "CROSS_DOM", 0x08: "PRIV_OP"}
+
+
+def caps_str(mask: int) -> str:
+    parts = [name for bit, name in sorted(CAP_NAMES.items()) if mask & bit]
+    return "|".join(parts) if parts else "NONE"
 
 
 def parse_record(raw: bytes) -> dict:
-    magic, version, rec_type, jiffies, priority, operation, checksum, payload_hash = \
+    magic, version, rec_type, jiffies, priority, src_domain, protocol, \
+        channel_id, operation, checksum, payload_hash = \
         struct.unpack(RECORD_FMT, raw)
     return {
-        "magic":        magic,
-        "version":      version,
-        "type":         rec_type,
-        "jiffies":      jiffies,
-        "priority":     priority,
-        "operation":    operation,
-        "checksum":     checksum,
+        "magic":       magic,
+        "version":     version,
+        "type":        rec_type,
+        "jiffies":     jiffies,
+        "priority":    priority,
+        "src_domain":  src_domain,
+        "protocol":    protocol,
+        "channel_id":  channel_id,
+        "operation":   operation,
+        "checksum":    checksum,
         "payload_hash": payload_hash.hex(),
     }
+
+
+def _unpack_le32(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<I", data, offset)[0]
 
 
 def format_record(r: dict) -> str:
     rtype = REC_TYPE_NAME.get(r["type"], f"UNK({r['type']})")
     prio  = PRIO_NAME.get(r["priority"], str(r["priority"]))
+    proto = PROTO_NAME.get(r["protocol"], str(r["protocol"]))
     j     = r["jiffies"]
+    ch    = r["channel_id"]
+    dom   = r["src_domain"]
+
     if r["type"] == 0:  # MSG
         return (
-            f"[j={j:>7}]  MSG       prio={prio:<4}  "
+            f"[j={j:>7}]  MSG       "
+            f"ch={ch} dom={dom} proto={proto:<4} prio={prio:<4}  "
             f"op=0x{r['operation']:08X}  csum=0x{r['checksum']:08X}  "
             f"hash={r['payload_hash'][:16]}..."
         )
+
     if r["type"] == 1:  # OVERFLOW
         return f"[j={j:>7}]  OVERFLOW  dropped={r['operation']}"
+
     if r["type"] == 2:  # HEARTBEAT
         return f"[j={j:>7}]  HEARTBEAT"
+
+    if r["type"] == 3:  # DENY — unpack structured fields
+        reason_code = r["checksum"] & 0xFF
+        dst_domain  = (r["checksum"] >> 8)  & 0xFF
+        dst_channel = (r["checksum"] >> 16) & 0xFF
+
+        raw_hash = bytes.fromhex(r["payload_hash"])
+        granted  = _unpack_le32(raw_hash, 0)
+        required = _unpack_le32(raw_hash, 4)
+        dst_ch32 = _unpack_le32(raw_hash, 8)
+
+        reason_name = DENY_REASON.get(reason_code, f"UNKNOWN({reason_code})")
+        dst_str = "none" if dst_ch32 == 0xFFFFFFFF else str(dst_ch32)
+
+        return (
+            f"[j={j:>7}]  DENY      "
+            f"ch={ch}(dom={dom},proto={proto})  "
+            f"reason={reason_name}  "
+            f"op=0x{r['operation']:08X}  "
+            f"granted=[{caps_str(granted)}]  "
+            f"required=[{caps_str(required)}]  "
+            f"dst=ch{dst_str}(dom={dst_domain})"
+        )
+
     return f"[j={j:>7}]  UNKNOWN   type={r['type']}"
 
 
@@ -100,6 +159,11 @@ def main() -> None:
         default=0,
         help="emit tumbling windows of N MSG records as JSON arrays",
     )
+    ap.add_argument(
+        "--deny",
+        action="store_true",
+        help="include DENY records in --window JSON output",
+    )
     args = ap.parse_args()
 
     if args.window < 0:
@@ -111,21 +175,33 @@ def main() -> None:
         r = parse_record(raw)
 
         if r["magic"] != MAGIC:
-            # Lost sync — report and try to recover on next 44-byte boundary.
             sys.stderr.write(
                 f"sync error: magic=0x{r['magic']:08X} (expected 0x{MAGIC:08X})\n"
             )
             continue
 
         if args.window > 0:
-            if r["type"] == 0:  # MSG records only
-                window_buf.append({
-                    "jiffies":      r["jiffies"],
-                    "priority":     r["priority"],
-                    "operation":    r["operation"],
-                    "checksum":     r["checksum"],
-                    "payload_hash": r["payload_hash"],
-                })
+            include = (r["type"] == 0) or (args.deny and r["type"] == 3)
+            if include:
+                entry: dict = {
+                    "type":       REC_TYPE_NAME.get(r["type"], r["type"]),
+                    "jiffies":    r["jiffies"],
+                    "src_domain": r["src_domain"],
+                    "protocol":   r["protocol"],
+                    "channel_id": r["channel_id"],
+                    "priority":   r["priority"],
+                    "operation":  r["operation"],
+                }
+                if r["type"] == 0:
+                    entry["checksum"]     = r["checksum"]
+                    entry["payload_hash"] = r["payload_hash"]
+                elif r["type"] == 3:
+                    raw_hash = bytes.fromhex(r["payload_hash"])
+                    entry["deny_reason"]  = r["checksum"] & 0xFF
+                    entry["dst_domain"]   = (r["checksum"] >> 8)  & 0xFF
+                    entry["granted_caps"] = _unpack_le32(raw_hash, 0)
+                    entry["required_caps"]= _unpack_le32(raw_hash, 4)
+                window_buf.append(entry)
                 if len(window_buf) >= args.window:
                     print(json.dumps(window_buf))
                     sys.stdout.flush()
