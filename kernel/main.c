@@ -6,6 +6,7 @@
 #include "console.h"
 #include "crypto.h"
 #include "watchdog.h"
+#include "capabilities.h"
 #include "transactions.h"
 #include "update.h"
 #include "sandbox.h"
@@ -18,9 +19,14 @@ void test_nng_patterns(void);
 void test_energy_grid_alert(void);
 void test_update_system(void);
 void test_watchdog(void);
+void test_ipc_enforcement(void);
 int  init_ipc(void);
-int  ipc_create_channel(uint32_t security_level, uint32_t domain, int protocol);
+int  ipc_create_channel(uint32_t security_level, uint32_t domain,
+                        uint32_t cap_mask, int protocol);
 int  ipc_send(int channel_id, message_t *msg);
+int  ipc_recv(int channel_id, message_t *msg, bool nonblock);
+int  ipc_connect(int src_id, int dst_id);
+int  ipc_close_channel(int channel_id);
 
 extern scheduler_ops_t rr_scheduler;
 
@@ -231,7 +237,7 @@ void test_update_system(void) {
 
 void test_watchdog(void) {
     log_message(LOG_INFO, "Testing watchdog telemetry path...\n");
-    int ch = ipc_create_channel(0, 0, NNG_PROTO_PUB0);
+    int ch = ipc_create_channel(0, 0, CAP_ALL, NNG_PROTO_PUB0);
     if (ch < 0) {
         log_message(LOG_ERROR, "Watchdog test: failed to create IPC channel\n");
         return;
@@ -246,6 +252,96 @@ void test_watchdog(void) {
     ipc_send(ch, &msg);          /* triggers ring_push */
     watchdog_tick();              /* drains ring → emits telemetry record on COM2 */
     log_message(LOG_INFO, "Watchdog test: record emitted (check /tmp/lugh_ipc.bin)\n");
+    ipc_close_channel(ch);
+}
+
+/* Test IPC enforcement: 3 subtests covering cap_send, cap_priv, domain checks.
+ * Each subtest expects a hard failure and a DENY record on the telemetry ring. */
+void test_ipc_enforcement(void) {
+    log_message(LOG_INFO, "Testing IPC enforcement...\n");
+    int pass = 0;
+    message_t msg;
+
+    /* ── Subtest 1: ipc_send blocked by missing CAP_IPC_SEND ─────── */
+    {
+        /* Channel has only CAP_IPC_RECV — no send right */
+        int ch = ipc_create_channel(0, 0, CAP_IPC_RECV, NNG_PROTO_PUB0);
+        if (ch < 0) {
+            log_message(LOG_ERROR, "Enforcement test 1: create failed\n");
+            goto done;
+        }
+        msg.priority  = PRIORITY_HIGH;
+        msg.operation = OP_HEARTBEAT;
+        msg.checksum  = 0;
+        msg._padding1 = 0;
+        msg.payload[0] = '\0';
+        int rv = ipc_send(ch, &msg);
+        if (rv == -7) {
+            log_message(LOG_INFO, "Enforcement test 1 PASS: send denied (CAP_SEND missing)\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Enforcement test 1 FAIL: expected -7, got %d\n", rv);
+        }
+        watchdog_tick();  /* drain DENY record to COM2 */
+        ipc_close_channel(ch);
+    }
+
+    /* ── Subtest 2: ipc_send blocked for privileged op (OP_DELETE) ─ */
+    {
+        /* Channel has send right but NOT CAP_PRIVILEGED_OP */
+        int ch = ipc_create_channel(0, 0, CAP_IPC_SEND | CAP_IPC_RECV,
+                                    NNG_PROTO_PUB0);
+        if (ch < 0) {
+            log_message(LOG_ERROR, "Enforcement test 2: create failed\n");
+            goto done;
+        }
+        msg.priority  = PRIORITY_HIGH;
+        msg.operation = OP_DELETE;
+        msg.checksum  = 0;
+        msg._padding1 = 0;
+        msg.payload[0] = '\0';
+        int rv = ipc_send(ch, &msg);
+        if (rv == -7) {
+            log_message(LOG_INFO,
+                "Enforcement test 2 PASS: send denied (CAP_PRIV missing for OP_DELETE)\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Enforcement test 2 FAIL: expected -7, got %d\n", rv);
+        }
+        watchdog_tick();
+        ipc_close_channel(ch);
+    }
+
+    /* ── Subtest 3: ipc_connect blocked by domain mismatch ──────── */
+    {
+        /* ch_a in domain 0, ch_b in domain 1; ch_a has no CAP_CROSS_DOMAIN */
+        int ch_a = ipc_create_channel(0, 0, CAP_IPC_SEND | CAP_IPC_RECV,
+                                      NNG_PROTO_PUB0);
+        int ch_b = ipc_create_channel(0, 1, CAP_IPC_SEND | CAP_IPC_RECV,
+                                      NNG_PROTO_SUB0);
+        if (ch_a < 0 || ch_b < 0) {
+            log_message(LOG_ERROR, "Enforcement test 3: create failed\n");
+            goto done;
+        }
+        int rv = ipc_connect(ch_a, ch_b);
+        if (rv == NNG_EACCESS) {
+            log_message(LOG_INFO,
+                "Enforcement test 3 PASS: connect denied (domain mismatch, no CAP_CROSS_DOMAIN)\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Enforcement test 3 FAIL: expected NNG_EACCESS (%d), got %d\n",
+                NNG_EACCESS, rv);
+        }
+        watchdog_tick();
+        ipc_close_channel(ch_a);
+        ipc_close_channel(ch_b);
+    }
+
+done:
+    log_message(LOG_INFO, "IPC enforcement tests: %d/3 passed\n", pass);
 }
 
 /* Plain byte comparison — avoids pulling in a memcmp declaration. */
@@ -473,6 +569,7 @@ void kmain(void) {
     test_nng();
     test_energy_grid_alert();
     test_watchdog();
+    test_ipc_enforcement();
     test_nng_patterns();
     
     // Test the update system
