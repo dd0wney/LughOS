@@ -3,6 +3,8 @@
 #include "hardware.h"
 #include "watchdog.h"
 
+extern scheduler_ops_t rr_scheduler;
+
 /**
  * Output a byte to an I/O port
  * 
@@ -66,6 +68,10 @@ int hw_detect(void) {
  */
 void process_events(void) {
     watchdog_tick();
+    if (rr_scheduler.schedule) {
+        uint32_t next_task_id = 0;
+        rr_scheduler.schedule(NULL, 0, &next_task_id);
+    }
 }
 
 /**
