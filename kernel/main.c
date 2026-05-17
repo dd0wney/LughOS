@@ -1,6 +1,7 @@
 #include "lugh.h"
 #include "security.h"
 #include "hardware.h"
+#include "interrupt.h"
 #include "nngcompat.h"
 #include "console.h"
 #include "crypto.h"
@@ -271,7 +272,18 @@ void kmain(void) {
     
     // Initialize crypto subsystem (depends on memory and security)
     crypto_init();
-    
+
+    // Initialize x86 interrupt subsystem: GDT → IDT → PIC → PIT → enable IRQs
+#if defined(__i386__)
+    gdt_init();        /* load our GDT; fixes the latent user-selector bug       */
+    idt_init();        /* install 32 exception + 16 IRQ + syscall gates           */
+    pic_remap();       /* remap PICs to 0x20-0x2F (out of exception vector space) */
+    pit_init(100);     /* 100 Hz timer on IRQ0; registers pit_tick handler        */
+    pic_unmask(0);     /* enable IRQ0 (PIT) in the PIC mask                       */
+    __asm__ volatile("sti");  /* IF=1: CPU accepts interrupts                     */
+    (void)spl0();      /* lower IPL to IPL_NONE: PIC delivers enabled IRQs        */
+#endif
+
 #if defined(__arm__)
     // Initialize ARM system call interface
     init_syscall_arm();
