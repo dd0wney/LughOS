@@ -83,16 +83,21 @@ KERNEL_COMMON_SRC = \
   kernel/user.c
   
 # Architecture-specific kernel sources
-X86_SPECIFIC_SRC = kernel/arch/x86/init.c
-ARM_SPECIFIC_SRC = kernel/arch/arm/init.c
-RISCV_SPECIFIC_SRC = kernel/arch/riscv/init.c kernel/arch/riscv/syscall_handler.c kernel/arch/riscv/console.c kernel/arch/riscv/early_debug.c
+X86_SPECIFIC_SRC = kernel/arch/x86/init.c kernel/arch/x86/gdt.c kernel/arch/x86/idt.c \
+                   kernel/arch/x86/isr.c kernel/arch/x86/pic.c kernel/arch/x86/pit.c
+ARM_SPECIFIC_SRC = kernel/arch/arm/init.c kernel/arch/arm/interrupt_stub.c
+RISCV_SPECIFIC_SRC = kernel/arch/riscv/init.c kernel/arch/riscv/syscall_handler.c \
+                     kernel/arch/riscv/console.c kernel/arch/riscv/early_debug.c \
+                     kernel/arch/riscv/interrupt_stub.c
 
 KERNEL_SRC = $(KERNEL_COMMON_SRC)
 
 SCHEDULER_SRC = services/scheduler/round_robin.c services/scheduler/utils.c
 STORAGE_SRC = services/storage/storage.c services/storage/transactions.c
 UPDATE_SRC = services/update/update.c services/update/sandbox.c
-X86_BOOT_SRC = kernel/arch/x86/boot_x86.S kernel/arch/x86/enter_user_mode.S
+WATCHDOG_SRC = services/watchdog/exporter.c kernel/ring_buffer.c
+X86_BOOT_SRC = kernel/arch/x86/boot_x86.S kernel/arch/x86/enter_user_mode.S \
+               kernel/arch/x86/gdt_load.S kernel/arch/x86/isr_stubs.S
 ARM_BOOT_SRC = kernel/arch/arm/boot_arm.S kernel/arch/arm/enter_user_mode.S
 RISCV_BOOT_SRC = kernel/arch/riscv/boot_riscv.S kernel/arch/riscv/enter_user_mode.S
 X86_SYSCALL_SRC = kernel/arch/x86/syscall.S
@@ -115,13 +120,13 @@ USER_ARM_OBJS = $(USER_LIB_SRC:.c=.user.arm.o) $(USER_TEST_SRC:.c=.user.arm.o) $
 USER_RISCV_OBJS = $(USER_LIB_SRC:.c=.user.riscv.o) $(USER_TEST_SRC:.c=.user.riscv.o) $(USER_RISCV_BOOT_SRC:.S=.user.riscv.o) $(USER_RISCV_SYSCALL_SRC:.S=.user.riscv.o)
 
 X86_OBJS = $(KERNEL_SRC:.c=.x86.o) $(X86_SPECIFIC_SRC:.c=.x86.o) $(SCHEDULER_SRC:.c=.x86.o) $(STORAGE_SRC:.c=.x86.o) \
-           $(UPDATE_SRC:.c=.x86.o) \
+           $(UPDATE_SRC:.c=.x86.o) $(WATCHDOG_SRC:.c=.x86.o) \
            $(X86_BOOT_SRC:.S=.x86.o) $(X86_SYSCALL_SRC:.S=.x86.o) $(SYSCALL_SRC:.c=.x86.o)
 ARM_OBJS = $(KERNEL_SRC:.c=.arm.o) $(ARM_SPECIFIC_SRC:.c=.arm.o) $(SCHEDULER_SRC:.c=.arm.o) $(STORAGE_SRC:.c=.arm.o) \
-           $(UPDATE_SRC:.c=.arm.o) \
+           $(UPDATE_SRC:.c=.arm.o) $(WATCHDOG_SRC:.c=.arm.o) \
            $(ARM_BOOT_SRC:.S=.arm.o) $(ARM_SYSCALL_SRC:.S=.arm.o) $(SYSCALL_SRC:.c=.arm.o)
 RISCV_OBJS = $(KERNEL_SRC:.c=.riscv.o) $(RISCV_SPECIFIC_SRC:.c=.riscv.o) $(SCHEDULER_SRC:.c=.riscv.o) $(STORAGE_SRC:.c=.riscv.o) \
-           $(UPDATE_SRC:.c=.riscv.o) \
+           $(UPDATE_SRC:.c=.riscv.o) $(WATCHDOG_SRC:.c=.riscv.o) \
            $(RISCV_BOOT_SRC:.S=.riscv.o) $(RISCV_SYSCALL_SRC:.S=.riscv.o) $(SYSCALL_SRC:.c=.riscv.o)
 
 X86_OUT = build/x86

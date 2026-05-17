@@ -1,6 +1,7 @@
 #include "console.h"
 #include "lugh.h"
 #include "hardware.h"
+#include "watchdog.h"
 
 /**
  * Output a byte to an I/O port
@@ -35,6 +36,19 @@ uint8_t inb(uint16_t port) {
 #endif
 
 /**
+ * Halt the CPU completely (kernel panic / unrecoverable error).
+ * cli prevents new interrupts; the hlt loop handles NMI wake-ups.
+ */
+void cpu_halt(void) {
+#ifdef __i386__
+    __asm__ volatile("cli");
+    while (1) __asm__ volatile("hlt");
+#else
+    while (1) {}
+#endif
+}
+
+/**
  * Detect and initialize hardware
  * 
  * @return int 1 if hardware initialization was successful, 0 otherwise
@@ -51,12 +65,16 @@ int hw_detect(void) {
  * Process any pending system events
  */
 void process_events(void) {
-    // TODO: process interrupts, timers, etc.
+    watchdog_tick();
 }
 
 /**
- * Put the CPU into a lower state until the next event
+ * Put the CPU into a lower state until the next event.
+ * sti; hlt is atomic on x86: interrupts are enabled for exactly the hlt
+ * instruction, so we never miss a tick between the sti and the sleep.
  */
 void cpu_idle(void) {
-    // TODO: use architecture-specific instructions to put the CPU into a low-power state
+#ifdef __i386__
+    __asm__ volatile("sti; hlt");
+#endif
 }

@@ -16,6 +16,7 @@ qemu-system-i386 \
     -nographic \
     -no-reboot \
     -monitor vc \
-    -serial stdio
+    -serial stdio \
+    -serial file:/tmp/lugh_ipc.bin
 
 echo "QEMU session ended."
