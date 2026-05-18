@@ -70,4 +70,20 @@ uint32_t alloc_frame(void);
 void     free_frame(uint32_t phys_addr);
 uint32_t frame_count_free(void);
 
+/* ── MMU enable (Phase 3 B3) ──────────────────────────────────────
+ *
+ * Identity-maps kernel + device window using 1 MB sections, sets DACR
+ * and TTBR0, invalidates TLB and caches, then sets SCTLR.M. Must be
+ * called AFTER any subsystem that touches a fixed physical address
+ * (vectors, stacks, device drivers) has initialised — they're mapped
+ * in the static table, but the MMU only starts enforcing translations
+ * after this returns.
+ *
+ * Caches stay off in B3 (B4/Phase 4 enables them once page tables are
+ * stable). Half-MMU is unbootable, so this is a single atomic op —
+ * either everything is set up and the kernel survives the next
+ * instruction fetch, or the kernel takes a fault that can't be
+ * diagnosed without JTAG. On non-ARM builds it's a no-op stub. */
+void arm_mmu_init(void);
+
 #endif /* MEMORY_H */

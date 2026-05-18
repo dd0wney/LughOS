@@ -1075,12 +1075,19 @@ void kmain(void) {
 #endif
 
 #if defined(__arm__)
-    // ARM interrupt subsystem: VIC → SP804 timer → CPU IRQ unmask.
-    // Mirrors the x86 pic_remap → pit_init → sti sequence above.
+    // ARM interrupt subsystem: VIC → SP804 timer → MMU enable → CPU IRQ unmask.
+    // Mirrors the x86 pic_remap → pit_init → paging → sti sequence above.
     extern void vic_init(void);
     extern void arm_timer_init(void);
     vic_init();
     arm_timer_init();
+    /* Phase 3 B3: enable MMU (identity-mapped, DACR=Manager, caches off).
+     * Order matters — vic_init / arm_timer_init have already poked the
+     * device registers, but those addresses are in the identity-mapped
+     * device window so subsequent accesses keep working. Done BEFORE the
+     * CPSR.I clear so the first IRQ to fire runs with MMU on, matching
+     * the post-B3 steady state. */
+    arm_mmu_init();
     /* ARMv5 has no `cpsie` (ARMv6+ only). Clear CPSR.I longhand. */
     __asm__ volatile(
         "mrs r0, cpsr\n\t"

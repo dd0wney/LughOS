@@ -80,6 +80,7 @@ KERNEL_COMMON_SRC = \
   kernel/mm/memory.c \
   kernel/mm/memory_utils.c \
   kernel/mm/frames.c \
+  kernel/mm/arm_mmu.c \
   kernel/fs/storage.c \
   kernel/ipc/ipc.c \
   kernel/security/domain_graph.c \
