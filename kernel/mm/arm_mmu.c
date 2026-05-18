@@ -148,6 +148,16 @@ void arm_tlb_invalidate_all(void) {
     __asm__ volatile("mcr p15, 0, %0, c8, c7, 0" : : "r"(zero) : "memory");
 }
 
+/* Read a section's current AP bits. Returns -1 if the L1 entry is
+ * invalid or not a section descriptor (i.e. nothing to inspect). */
+int arm_section_get_ap(uint32_t va) {
+    uint32_t idx = va >> 20;
+    if (idx >= 4096u) return -1;
+    if (l1_page_table[idx] == 0u) return -1;
+    if ((l1_page_table[idx] & 0x3u) != 0x2u) return -1;
+    return (int)((l1_page_table[idx] >> 10) & 0x3u);
+}
+
 /* Change the AP bits of a single 1 MB section. Used by map_user_space()
  * below to flip a section between kernel-only and user-RW (or vice
  * versa) — the only granularity available without L2 page tables.
@@ -234,5 +244,6 @@ void arm_mmu_init(void) {
 /* Non-ARM stubs for the B4 helpers so memory.h's declarations can be
  * called unconditionally from arch-neutral code. */
 int  arm_section_set_ap(uint32_t va, uint32_t ap) { (void)va; (void)ap; return 0; }
+int  arm_section_get_ap(uint32_t va)              { (void)va; return -1; }
 void arm_tlb_invalidate_all(void) { }
 #endif

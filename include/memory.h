@@ -102,6 +102,13 @@ void arm_mmu_init(void);
  * arm_tlb_invalidate_all flushes the entire TLB — call after L1
  * mutations done by paths other than arm_section_set_ap. */
 int  arm_section_set_ap(uint32_t va, uint32_t ap);
+int  arm_section_get_ap(uint32_t va);    /* returns AP bits 0..3 or -1 if unmapped */
 void arm_tlb_invalidate_all(void);
+
+/* AP constants exposed for the B6 test and any caller that wants to
+ * toggle a section between privileges. See arm_mmu.c for full encoding. */
+#define MMU_AP_KERNEL_ONLY  1u
+#define MMU_AP_USER_RO      2u
+#define MMU_AP_USER_RW      3u
 
 #endif /* MEMORY_H */
