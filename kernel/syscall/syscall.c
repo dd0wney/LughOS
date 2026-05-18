@@ -120,6 +120,12 @@ void syscall_handler(uint32_t num, uint32_t arg1, uint32_t arg2, uint32_t arg3) 
                 "SYS_EXIT: task=%u exit_code=%d",
                 (caller != NULL) ? caller->task_id : 0u, (int)arg1);
             if (caller != NULL) {
+                /* J4: TASK_EXIT telemetry — emit BEFORE the state
+                 * transition so the caller's task_id is still
+                 * unambiguous (the scheduler hasn't yet retired
+                 * the slot, and parent_task_id is still readable
+                 * for cross-correlation). */
+                auditor_task_exit(caller->task_id, (int)arg1);
                 caller->state = TASK_TERMINATED;
                 if (rr_scheduler.remove_task) {
                     rr_scheduler.remove_task(caller->task_id);

@@ -356,6 +356,35 @@ void auditor_task_create(uint32_t task_id,
                             priority, kernel_stack_top);
 }
 
+/* TASK_EXIT: lifecycle terminus event. Field reuse:
+ *   priority/src_domain/protocol/channel_id = 0
+ *   operation     = task_id  (full uint32)
+ *   checksum      = (uint32_t)exit_code  (signed int reinterpreted)
+ *   payload_hash  = zeros
+ *
+ * Emitted synchronously from SYS_EXIT BEFORE the TASK_TERMINATED
+ * state transition, so the caller's task_id is unambiguously the
+ * exiting task — not a recycled slot. */
+static void emit_task_exit_record(uint32_t task_id, int exit_code) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_TASK_EXIT);
+    rec.priority   = 0;
+    rec.src_domain = 0;
+    rec.protocol   = 0;
+    rec.channel_id = 0;
+    rec.operation  = task_id;
+    rec.checksum   = (uint32_t)exit_code;
+    uint32_t i;
+    for (i = 0; i < 16u; i++) rec.payload_hash[i] = 0;
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_task_exit(uint32_t task_id, int exit_code) {
+    if (!auditor_enabled)
+        return;
+    emit_task_exit_record(task_id, exit_code);
+}
+
 /* ── DENY record emission ────────────────────────────────────────── */
 
 void auditor_deny(const auditor_deny_info_t *info) {
