@@ -90,7 +90,7 @@ KERNEL_COMMON_SRC = \
 X86_SPECIFIC_SRC = kernel/arch/x86/init.c kernel/arch/x86/gdt.c kernel/arch/x86/idt.c \
                    kernel/arch/x86/isr.c kernel/arch/x86/pic.c kernel/arch/x86/pit.c
 ARM_SPECIFIC_SRC = kernel/arch/arm/init.c kernel/arch/arm/interrupt_stub.c \
-                   kernel/arch/arm/vic.c
+                   kernel/arch/arm/vic.c kernel/arch/arm/timer.c
 RISCV_SPECIFIC_SRC = kernel/arch/riscv/init.c kernel/arch/riscv/syscall_handler.c \
                      kernel/arch/riscv/console.c kernel/arch/riscv/early_debug.c \
                      kernel/arch/riscv/interrupt_stub.c

@@ -643,11 +643,18 @@ void kmain(void) {
 #endif
 
 #if defined(__arm__)
-    // Bring up the PL190 VIC. Sources stay masked at the VIC until each
-    // driver calls irq_register_handler; the CPU I-bit stays set until a
-    // later "sti-equivalent" once timer + IPL are wired (Phase 2 step 2).
+    // ARM interrupt subsystem: VIC → SP804 timer → CPU IRQ unmask.
+    // Mirrors the x86 pic_remap → pit_init → sti sequence above.
     extern void vic_init(void);
+    extern void arm_timer_init(void);
     vic_init();
+    arm_timer_init();
+    /* ARMv5 has no `cpsie` (ARMv6+ only). Clear CPSR.I longhand. */
+    __asm__ volatile(
+        "mrs r0, cpsr\n\t"
+        "bic r0, r0, #0x80\n\t"
+        "msr cpsr_c, r0"
+        : : : "r0", "memory");
     // Initialize ARM system call interface
     init_syscall_arm();
 #elif defined(__riscv)
