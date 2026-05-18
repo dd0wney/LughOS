@@ -15,10 +15,12 @@
 
 /* Denial reason codes embedded in watchdog_deny_info_t.reason.
  * Values are stable — the JEPA encoder treats them as class labels. */
-#define DENY_CAP_SEND      1u  /* ipc_send: CAP_IPC_SEND missing          */
-#define DENY_CAP_RECV      2u  /* ipc_recv: CAP_IPC_RECV missing          */
-#define DENY_CAP_PRIV      3u  /* ipc_send: CAP_PRIVILEGED_OP missing     */
-#define DENY_DOMAIN        4u  /* ipc_connect: cross-domain, no CAP_CROSS_DOMAIN */
+#define DENY_CAP_SEND       1u  /* ipc_send: CAP_IPC_SEND missing          */
+#define DENY_CAP_RECV       2u  /* ipc_recv: CAP_IPC_RECV missing          */
+#define DENY_CAP_PRIV       3u  /* ipc_send: CAP_PRIVILEGED_OP missing     */
+#define DENY_DOMAIN         4u  /* ipc_connect: cross-domain, no CAP_CROSS_DOMAIN */
+#define DENY_CAP_ESCALATION 5u  /* ipc_create_channel: caps exceed task    */
+#define DENY_DOMAIN_CREATE  6u  /* ipc_create_channel: cross-domain, no CAP_CROSS_DOMAIN */
 
 /* Return which CAP_* bits are required to send a given operation code.
  * Privileged ops (UPDATE / WRITE / DELETE) require CAP_PRIVILEGED_OP

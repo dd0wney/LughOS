@@ -43,7 +43,10 @@ REC_TYPE_NAME = {0: "MSG", 1: "OVERFLOW", 2: "HEARTBEAT", 3: "DENY"}
 PRIO_NAME     = {0: "HIGH", 1: "MED", 2: "LOW"}
 PROTO_NAME    = {1: "PAIR", 2: "PUB", 3: "SUB", 4: "REQ", 5: "REP",
                  6: "PUSH", 7: "PULL", 8: "BUS", 9: "SURV", 10: "RESP"}
-DENY_REASON   = {1: "CAP_SEND", 2: "CAP_RECV", 3: "CAP_PRIV", 4: "DOMAIN"}
+DENY_REASON   = {
+    1: "CAP_SEND",        2: "CAP_RECV",       3: "CAP_PRIV",
+    4: "DOMAIN",          5: "CAP_ESCALATION", 6: "DOMAIN_CREATE",
+}
 
 CAP_NAMES = {0x01: "SEND", 0x02: "RECV", 0x04: "CROSS_DOM", 0x08: "PRIV_OP"}
 

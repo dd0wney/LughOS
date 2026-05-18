@@ -20,6 +20,7 @@ void test_energy_grid_alert(void);
 void test_update_system(void);
 void test_watchdog(void);
 void test_ipc_enforcement(void);
+void test_task_caps(void);
 int  init_ipc(void);
 int  ipc_create_channel(uint32_t security_level, uint32_t domain,
                         uint32_t cap_mask, int protocol);
@@ -344,6 +345,100 @@ done:
     log_message(LOG_INFO, "IPC enforcement tests: %d/3 passed\n", pass);
 }
 
+/* Test task-bound capabilities: a child task cannot escalate beyond its
+ * parent's caps, and a restricted task cannot mint a privileged channel.
+ * Exercises both the bounded-narrowing rule in create_task and the
+ * escalation gate in ipc_create_channel. */
+void test_task_caps(void) {
+    log_message(LOG_INFO, "Testing task-bound capabilities...\n");
+    int pass = 0;
+    task_t* saved = current_task;
+
+    /* ── Subtest 1: bounded narrowing — child asking for CAP_ALL from a
+     *    parent holding only CAP_IPC_SEND must be narrowed to CAP_IPC_SEND ── */
+    {
+        task_t restricted_parent;
+        restricted_parent.task_id  = 0u;
+        restricted_parent.priority = 5;
+        restricted_parent.cap_mask = CAP_IPC_SEND;
+        restricted_parent.domain   = 0u;
+        restricted_parent.state    = TASK_RUNNING;
+        restricted_parent.deadline = 0u;
+        current_task = &restricted_parent;
+
+        task_t spec;
+        spec.task_id  = 0u;
+        spec.priority = 6;
+        spec.cap_mask = CAP_ALL;       /* tries to grab everything */
+        spec.domain   = 0u;
+        spec.state    = TASK_READY;
+        spec.deadline = 0u;
+        int rv = create_task(&spec);
+        if (rv == 0 && spec.cap_mask == CAP_IPC_SEND) {
+            log_message(LOG_INFO,
+                "Task caps test 1 PASS: child narrowed to 0x%X\n",
+                spec.cap_mask);
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Task caps test 1 FAIL: rv=%d caps=0x%X (expected 0x%X)\n",
+                rv, spec.cap_mask, CAP_IPC_SEND);
+        }
+        current_task = saved;
+    }
+
+    /* ── Subtest 2: a restricted task cannot mint a CAP_ALL channel ── */
+    {
+        task_t child;
+        child.task_id  = 1000u;
+        child.priority = 5;
+        child.cap_mask = CAP_IPC_SEND | CAP_IPC_RECV;
+        child.domain   = 0u;
+        child.state    = TASK_RUNNING;
+        child.deadline = 0u;
+        current_task = &child;
+
+        int ch = ipc_create_channel(0u, 0u, CAP_ALL, NNG_PROTO_PUB0);
+        if (ch < 0) {
+            log_message(LOG_INFO,
+                "Task caps test 2 PASS: escalation denied (rv=%d)\n", ch);
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Task caps test 2 FAIL: escalation allowed (ch=%d)\n", ch);
+            ipc_close_channel(ch);
+        }
+        current_task = saved;
+    }
+
+    /* ── Subtest 3: the same restricted task CAN create a within-caps channel ── */
+    {
+        task_t child;
+        child.task_id  = 1001u;
+        child.priority = 5;
+        child.cap_mask = CAP_IPC_SEND | CAP_IPC_RECV;
+        child.domain   = 0u;
+        child.state    = TASK_RUNNING;
+        child.deadline = 0u;
+        current_task = &child;
+
+        int ch = ipc_create_channel(0u, 0u, CAP_IPC_SEND, NNG_PROTO_PUB0);
+        if (ch >= 0) {
+            log_message(LOG_INFO,
+                "Task caps test 3 PASS: subset channel allowed (ch=%d)\n", ch);
+            pass++;
+            ipc_close_channel(ch);
+        } else {
+            log_message(LOG_ERROR,
+                "Task caps test 3 FAIL: subset channel denied (rv=%d)\n", ch);
+        }
+        current_task = saved;
+    }
+
+    current_task = saved;
+    log_message(LOG_INFO, "Task caps tests: %d/3 passed\n", pass);
+}
+
 /* Plain byte comparison — avoids pulling in a memcmp declaration. */
 static int nng_test_body_eq(const nng_msg_t *m, const char *want, int len) {
     if (nng_msg_len(m) != len) return 0;
@@ -558,6 +653,10 @@ void kmain(void) {
     init_syscall();
 #endif
     
+    // Establish root-of-trust task before IPC: ipc_create_channel checks
+    // current_task->cap_mask, so it must point to a real task by this point.
+    task_init();
+
     // Initialize IPC subsystem (includes NNG init) and arm watchdog ring
     init_ipc();
     watchdog_init();
@@ -570,6 +669,7 @@ void kmain(void) {
     test_energy_grid_alert();
     test_watchdog();
     test_ipc_enforcement();
+    test_task_caps();
     test_nng_patterns();
     
     // Test the update system

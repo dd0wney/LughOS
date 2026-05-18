@@ -17,9 +17,10 @@ static int rr_init(void *context) {
     for (i = 0; i < RR_MAX_TASKS; i++) {
         rr_tasks[i].task_id  = 0;
         rr_tasks[i].priority = 0;
+        rr_tasks[i].cap_mask = 0;
+        rr_tasks[i].domain   = 0;
         rr_tasks[i].state    = TASK_TERMINATED;
         rr_tasks[i].deadline = 0;
-        rr_tasks[i]._padding1 = 0;
     }
     rr_task_count = 0;
     rr_cursor     = 0;

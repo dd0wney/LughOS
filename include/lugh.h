@@ -60,11 +60,14 @@ typedef enum {
     LOG_LEVEL_COUNT
 } log_level_t;
 
-/* Task structure for scheduler */
+/* Task structure for scheduler.
+ * cap_mask + domain are bound at create_task() and immutable thereafter,
+ * making the task the root of trust for any channel it owns. */
 typedef struct {
-    uint32_t task_id;
+    uint32_t task_id;  /* unique non-zero id; 0 reserved for "no task" */
     int priority;      /* 0 (highest) to 10 (lowest) */
-    uint32_t _padding1;/* Explicit padding per CERT DCL39-C */
+    uint32_t cap_mask; /* CAP_* bitmask; see include/capabilities.h */
+    uint32_t domain;   /* security domain — IPC cross-domain rules apply */
     uint64_t state;    /* TASK_READY, TASK_RUNNING, TASK_BLOCKED, TASK_TERMINATED */
     uint64_t deadline; /* For future real-time scheduling */
 } task_t;
@@ -145,6 +148,12 @@ void scheduler_service(void* socket, scheduler_ops_t* ops);
 void log_message(log_level_t level, const char* format, ...);
 uint64_t generate_txn_id(void);
 uint64_t generate_secure_id(void);
+
+/* Task subsystem. task_init() must be called before init_ipc() so that
+ * channel-creation cap checks have a valid current_task to compare against. */
+void task_init(void);
+int  create_task(task_t* spec);
+extern task_t* current_task;
 void process_events(void);
 void cpu_idle(void);
 void enter_user_mode(uint32_t user_eip, uint32_t user_esp) __attribute__((noreturn));
