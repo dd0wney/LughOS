@@ -23,6 +23,7 @@ void test_auditor(void);
 void test_ipc_enforcement(void);
 void test_task_caps(void);
 void test_task_lifecycle(void);
+void test_frame_allocator(void);
 int  init_ipc(void);
 int  ipc_create_channel(uint32_t security_level, uint32_t domain,
                         uint32_t cap_mask, int protocol);
@@ -657,6 +658,64 @@ void test_task_lifecycle(void) {
     }
 }
 
+/* ── test_frame_allocator (Phase 3 B1) ─────────────────────────────
+ * Exercises alloc/free/reuse semantics and bookkeeping. The B2/B3 MMU
+ * commits depend on these primitives behaving correctly under load. */
+void test_frame_allocator(void) {
+    log_message(LOG_INFO, "Testing page frame allocator...\n");
+    int pass = 0;
+    uint32_t before = frame_count_free();
+
+    /* Subtest 1: three sequential allocs are contiguous and decrement free count */
+    uint32_t f1 = alloc_frame();
+    uint32_t f2 = alloc_frame();
+    uint32_t f3 = alloc_frame();
+    if (f1 != 0u && f2 != 0u && f3 != 0u &&
+        (f2 - f1) == MM_FRAME_SIZE && (f3 - f2) == MM_FRAME_SIZE &&
+        frame_count_free() == before - 3u) {
+        log_message(LOG_INFO,
+            "Frame test 1 PASS: 3 sequential frames at 0x%X / 0x%X / 0x%X "
+            "(free %u -> %u)\n", f1, f2, f3, before, frame_count_free());
+        pass++;
+    } else {
+        log_message(LOG_ERROR, "Frame test 1 FAIL: f1=0x%X f2=0x%X f3=0x%X free=%u\n",
+            f1, f2, f3, frame_count_free());
+    }
+
+    /* Subtest 2: free middle frame, re-alloc should reuse the same slot */
+    free_frame(f2);
+    uint32_t f4 = alloc_frame();
+    if (f4 == f2 && frame_count_free() == before - 3u) {
+        log_message(LOG_INFO,
+            "Frame test 2 PASS: freed 0x%X reused on next alloc\n", f2);
+        pass++;
+    } else {
+        log_message(LOG_ERROR,
+            "Frame test 2 FAIL: expected reuse of 0x%X, got 0x%X\n", f2, f4);
+    }
+
+    /* Subtest 3: defensive — double-free + misaligned + out-of-range tolerated */
+    uint32_t saved_free = frame_count_free();
+    free_frame(f1);
+    free_frame(f1);                /* double-free, should be ignored */
+    free_frame(0xDEADBEE0u);       /* out of pool */
+    free_frame(0x00200001u);       /* misaligned */
+    if (frame_count_free() == saved_free + 1u) {
+        log_message(LOG_INFO,
+            "Frame test 3 PASS: defensive free correctly ignored bad inputs\n");
+        pass++;
+    } else {
+        log_message(LOG_ERROR,
+            "Frame test 3 FAIL: free count diverged (got %u expected %u)\n",
+            frame_count_free(), saved_free + 1u);
+    }
+
+    /* Clean up so subsequent code starts from a known free count */
+    free_frame(f3);
+    free_frame(f4);
+    log_message(LOG_INFO, "Frame allocator tests: %d/3 passed\n", pass);
+}
+
 /* Plain byte comparison — avoids pulling in a memcmp declaration. */
 static int nng_test_body_eq(const nng_msg_t *m, const char *want, int len) {
     if (nng_msg_len(m) != len) return 0;
@@ -997,7 +1056,10 @@ void kmain(void) {
     
     // Initialize memory subsystem (Per NASA Power of Ten rule 3: all allocation at init time)
     memory_init();
-    
+
+    // Page frame allocator (Phase 3 B1) — foundation for MMU work in B2/B3/B4.
+    frame_allocator_init();
+
     // Initialize crypto subsystem (depends on memory and security)
     crypto_init();
 
@@ -1059,6 +1121,7 @@ void kmain(void) {
     test_ipc_enforcement();
     test_task_caps();
     test_task_lifecycle();
+    test_frame_allocator();
     test_transactional_storage();
     test_nng_patterns();
 

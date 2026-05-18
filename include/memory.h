@@ -52,4 +52,22 @@ int load_user_program(void* binary_data, size_t size, uint32_t* entry_point, uin
 #define KERNEL_WRITE    0x20
 #define KERNEL_EXEC     0x10
 
+/* ── Page frame allocator (Phase 3 B1) ─────────────────────────────
+ *
+ * 4 KB frames carved from a static physical pool. Foundation for the
+ * MMU work in B2 (x86 paging), B3 (ARM MMU enable), and B4 (real
+ * map_user_space). NASA Power of Ten rule 5: pool size fixed at
+ * compile time, no runtime growth.
+ *
+ * alloc_frame returns the physical address of a free frame or 0 on
+ * failure. free_frame returns a frame to the pool; defensive against
+ * double-free / unaligned / out-of-range input (logs + returns).
+ */
+#define MM_FRAME_SIZE   4096u
+
+void     frame_allocator_init(void);
+uint32_t alloc_frame(void);
+void     free_frame(uint32_t phys_addr);
+uint32_t frame_count_free(void);
+
 #endif /* MEMORY_H */
