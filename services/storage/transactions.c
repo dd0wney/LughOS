@@ -1,17 +1,38 @@
 #include "lugh.h"
 #include "assert.h"
+#include "interrupt.h"
+#include "hardware.h"
 #include "transactions.h"
 
 // Forward declarations
 void log_transaction_file(const char *operation, const char *src, const char *dst);
 
-// JPL Rule 13: Limited scope for data and functions
-// SEI CERT DCL30-C: Declare objects with appropriate storage duration
-// SEI CERT INT30-C: Ensure unsigned integer operations do not wrap
+/* Atomic monotonic 64-bit allocator.
+ *
+ * IPL bracketing (splhigh/splx) makes the increment indivisible against
+ * any kernel-mode preempter. On UP ARMv5 this is sufficient — there is
+ * no other core, so once IRQs are masked the read-modify-write is
+ * indivisible. No LDREX/STREX needed. The same bracketing semantics
+ * hold on x86 via splhigh tracking the PIC mask.
+ *
+ * Defensive wrap check: 2^64 IDs is unreachable in practice (~585 years
+ * at 1 GHz allocation), but per NASA Power of Ten rule 5 we assert the
+ * invariant rather than assume it. On wrap, halt — there is no recovery.
+ *
+ * SEI CERT INT30-C: explicit pre-increment check prevents UB on
+ * unsigned wrap.
+ * JPL Rule 16: critical invariant enforced. */
 uint64_t generate_transaction_id(void) {
-    static uint64_t next_id = 1; // Start from 1 to avoid zero ID
-    // JPL Rule 16: Use assertions for critical invariants (not shown, but should check for wrap)
-    return next_id++;
+    static uint64_t next_id = 1u; /* 0 reserved as "no txn" */
+    spl_t prev = splhigh();
+    if (next_id == 0xFFFFFFFFFFFFFFFFull) {
+        splx(prev); /* leave IPL consistent before halting */
+        cpu_halt();
+    }
+    uint64_t id = next_id;
+    next_id++;
+    splx(prev);
+    return id;
 }
 
 int create_checkpoint(const char *src, const char *dst) {
