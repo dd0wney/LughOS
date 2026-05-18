@@ -21,36 +21,50 @@ void log_tick(void) {
     log_ticks++;
 }
 
-// Initialize serial port for debugging
+/* Per-arch serial backend. Each arch must provide init_serial + serial_write.
+ * Arch-specific MMIO addresses are declared here rather than in a header so
+ * the log subsystem stays self-contained as the early-boot debug surface. */
+
+#ifdef __i386__
+/* x86: 16550-compatible UART at COM1 (0x3F8). */
 static void init_serial(void) {
-    // COM1 port (0x3F8)
-    // Disable interrupts
-    outb(0x3F9, 0x00);
-    
-    // Set baud rate to 38400 baud
-    outb(0x3FB, 0x80);    // Enable DLAB
-    outb(0x3F8, 0x03);    // Low byte (38400 baud)
-    outb(0x3F9, 0x00);    // High byte
-    
-    // 8 bits, no parity, one stop bit
-    outb(0x3FB, 0x03);
-    
-    // Enable FIFO, clear, 14-byte threshold
-    outb(0x3FA, 0xC7);
-    
-    // Mark data terminal ready, signal request to send
-    outb(0x3FC, 0x0B);
+    outb(0x3F9, 0x00);    /* disable interrupts                       */
+    outb(0x3FB, 0x80);    /* DLAB on                                  */
+    outb(0x3F8, 0x03);    /* divisor low — 38400 baud                 */
+    outb(0x3F9, 0x00);    /* divisor high                             */
+    outb(0x3FB, 0x03);    /* 8N1, DLAB off                            */
+    outb(0x3FA, 0xC7);    /* FIFO on, clear, 14-byte threshold        */
+    outb(0x3FC, 0x0B);    /* DTR + RTS                                */
 }
 
-// Write a single character to the serial port
 static void serial_write(uint8_t c) {
-    // Wait until transmitter holding register is empty
-    while ((inb(0x3FD) & 0x20) == 0) {
-        // spin
-    }
-    // Send the character
+    while ((inb(0x3FD) & 0x20) == 0) { /* spin until LSR THRE         */ }
     outb(0x3F8, c);
 }
+
+#elif defined(__arm__)
+/* ARM: PL011 UART0 on QEMU's `versatilepb` board.
+ * Base 0x101F1000. DR at +0x00, FR at +0x18 (bit 5 = TXFF).
+ * The QEMU PL011 model is usable from reset, so no init is required. */
+#define PL011_DR (*(volatile uint32_t *)(0x101F1000u + 0x00u))
+#define PL011_FR (*(volatile uint32_t *)(0x101F1000u + 0x18u))
+#define PL011_FR_TXFF (1u << 5)
+
+static void init_serial(void) {
+    /* No-op: QEMU's PL011 model accepts writes from reset. A real board
+     * would set IBRD/FBRD for baud and enable TX/RX via CR here. */
+}
+
+static void serial_write(uint8_t c) {
+    while ((PL011_FR & PL011_FR_TXFF) != 0u) { /* spin while TX FIFO full */ }
+    PL011_DR = (uint32_t)c;
+}
+
+#else
+/* Fallback: no serial backend. Logs are silent. */
+static void init_serial(void) { }
+static void serial_write(uint8_t c) { (void)c; }
+#endif
 
 // Basic implementation of kernel console output 
 // Outputs to both VGA and serial port
@@ -64,6 +78,9 @@ static void kputchar(char c) {
         initialized = 1;
     }
     serial_write((uint8_t)c); // Explicit cast for sign-conversion
+#ifdef __i386__
+    /* VGA text mode at 0xB8000 — x86 PC-compatible only. On ARM/RISC-V
+     * this address is DRAM, so writes would corrupt the kernel. */
     static volatile unsigned short* vga_buffer = (unsigned short*)0xB8000;
     static int position = 0;
     if (c == '\n') {
@@ -76,6 +93,7 @@ static void kputchar(char c) {
             position = 0;
         }
     }
+#endif
 }
 
 // Very basic printf-like functionality
@@ -131,13 +149,20 @@ static void kprintf(const char* format, va_list args) {
                 }
                 break;
             }
-            case 'x': {
+            case 'x':
+            case 'X': {
+                /* Single handler, case selects the digit alphabet. The 'X'
+                 * path matters because callers that use uppercase format
+                 * specifiers would otherwise fall into the default branch,
+                 * print "%X" literally, and shift every subsequent argument
+                 * by one — a silent argument-misalignment bug. */
+                char a = (c == 'X') ? 'A' : 'a';
                 unsigned int value = va_arg(args, unsigned int);
                 char buffer[8];
                 int i = 0;
                 do {
                     int digit = value & 0xF;
-                    buffer[i++] = (char)((digit < 10) ? ('0' + digit) : ('a' + digit - 10));
+                    buffer[i++] = (char)((digit < 10) ? ('0' + digit) : (a + digit - 10));
                     value >>= 4;
                 } while (i < 8); // Always print 8 hex digits
                 while (i > 0) {

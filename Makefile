@@ -53,7 +53,11 @@ COMMON_CFLAGS = -ffreestanding -nostdlib -Wall -Wextra -Werror -Wformat=2 -Wform
          -DDEBUG -D_FORTIFY_SOURCE=2 -Iinclude -Ilib/nng/include -O2
 
 X86_CFLAGS = $(COMMON_CFLAGS) $(X86_ARCH_FLAGS)
-ARM_CFLAGS = $(COMMON_CFLAGS) $(ARM_ARCH_FLAGS)
+# ARM target: QEMU `versatilepb` board has an ARM926EJ-S (ARMv5TE).
+# -marm forces ARM mode (the default in some toolchains is Thumb-only,
+# which won't run on this CPU). -mfloat-abi=soft avoids requiring an FPU
+# the ARM926 doesn't have.
+ARM_CFLAGS = $(COMMON_CFLAGS) $(ARM_ARCH_FLAGS) -mcpu=arm926ej-s -marm -mfloat-abi=soft
 # Disable conversion warnings for RISC-V due to pointer size differences
 RISCV_CFLAGS = $(COMMON_CFLAGS) $(RISCV_ARCH_FLAGS) -Wno-conversion
 # commented out for the time being -fstack-protector-strong

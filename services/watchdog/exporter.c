@@ -18,6 +18,7 @@ static uint32_t heartbeat_counter = 0;
 
 /* ── COM2 helpers ────────────────────────────────────────────────── */
 
+#ifdef __i386__
 static void com2_init(void) {
     outb(COM2_PORT + 1, 0x00);
     outb(COM2_PORT + 3, 0x80);
@@ -37,6 +38,20 @@ static void com2_write_bytes(const void *buf, uint32_t len) {
         outb(COM2_PORT, p[i]);
     }
 }
+#else
+/* Non-x86: telemetry I/O sink not yet wired. The record-formatting paths
+ * still run (so DENY / MSG / overflow construction is exercised on every
+ * target), but the bytes are discarded. Phase 2 routes ARM telemetry to
+ * PL011 UART1 on versatilepb and RISC-V to a second SBI console; keeping
+ * the formatting paths live now makes that switch a one-function change.
+ *
+ * Crucially this avoids the inb()-returns-0-forever infinite spin that
+ * the x86 path takes on any architecture where inb is a no-op stub. */
+static void com2_init(void) { }
+static void com2_write_bytes(const void *buf, uint32_t len) {
+    (void)buf; (void)len;
+}
+#endif
 
 /* ── Payload fingerprint: 4× FNV-1a-32 with distinct seeds ──────── */
 
