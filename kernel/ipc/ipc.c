@@ -20,6 +20,64 @@ typedef struct {
 
 static ipc_channel_t channels[MAX_IPC_CHANNELS];
 
+/* ── J6: bounded lineage helpers ────────────────────────────────── */
+
+/* Saturating 4-bit cap — both depth and sibling_count must fit in a
+ * nibble (see auditor.h DENY field mapping). 15 = "≥15"; the encoder
+ * treats the cap as an upper bound, not an exact count. */
+#define LINEAGE_NIBBLE_MAX 15u
+
+/* Walk parent_task_id chain up from t, returning the number of hops to
+ * the root. Hard-bounded by MAX_TASKS (so we can't loop on a corrupted
+ * chain) AND by LINEAGE_NIBBLE_MAX (so we stop the moment we can't
+ * encode more — no point spending more cycles).
+ *
+ * t == NULL → 0 (no caller). t at root (parent = TASK_PARENT_NONE) → 0. */
+static uint8_t lineage_depth_of(const task_t *t) {
+    if (t == NULL) return 0u;
+    uint32_t depth = 0u;
+    uint32_t pid   = t->parent_task_id;
+    uint32_t guard;
+    for (guard = 0u; guard < (uint32_t)MAX_TASKS; guard++) {
+        if (pid == TASK_PARENT_NONE) return (uint8_t)depth;
+        depth++;
+        if (depth >= LINEAGE_NIBBLE_MAX) return (uint8_t)LINEAGE_NIBBLE_MAX;
+        task_t *parent = task_find(pid);
+        if (parent == NULL) {
+            /* Chain points at a recycled / vanished slot — treat as
+             * "depth reached" rather than escalate. The encoder sees
+             * a truncated chain via depth=hops-so-far. */
+            return (uint8_t)depth;
+        }
+        pid = parent->parent_task_id;
+    }
+    /* MAX_TASKS-deep cycle without hitting root — shouldn't happen,
+     * but be defensive: return the cap. */
+    return (uint8_t)LINEAGE_NIBBLE_MAX;
+}
+
+/* Count tasks in the kernel table that share t's parent_task_id,
+ * EXCLUDING t itself. Bounded by table size and the nibble cap. */
+static uint8_t sibling_count_of(const task_t *t) {
+    if (t == NULL) return 0u;
+    uint32_t target_parent = t->parent_task_id;
+    uint32_t count         = 0u;
+    task_t  *table         = task_table();
+    int      n             = task_table_count();
+    for (int i = 0; i < n; i++) {
+        if (&table[i] == t) continue;
+        /* TERMINATED tasks are "siblings that used to exist" — keep
+         * counting them because they are part of the lineage shape
+         * the encoder sees. Skipping them would make depth/siblings
+         * jitter as the table churned. */
+        if (table[i].parent_task_id == target_parent) {
+            count++;
+            if (count >= LINEAGE_NIBBLE_MAX) return (uint8_t)LINEAGE_NIBBLE_MAX;
+        }
+    }
+    return (uint8_t)count;
+}
+
 /* ── Internal: fill deny info and emit via auditor ──────────────── */
 
 /* Create-time denial (no channel exists yet): src_channel/dst_channel
@@ -41,10 +99,10 @@ static void emit_create_deny(uint32_t requested_caps, uint32_t target_domain,
     d.operation      = 0u;
     d.granted_caps   = current_task->cap_mask;
     d.required_caps  = requested_caps;
-    /* J5: caller's lineage at deny time. J6 will populate depth/siblings. */
+    /* J5/J6: caller's lineage at deny time. */
     d.parent_task_id = current_task->parent_task_id;
-    d.lineage_depth  = 0u;
-    d.sibling_count  = 0u;
+    d.lineage_depth  = lineage_depth_of(current_task);
+    d.sibling_count  = sibling_count_of(current_task);
     d._pad2[0]       = 0u;
     d._pad2[1]       = 0u;
     auditor_deny(&d);
@@ -70,15 +128,19 @@ static void emit_deny(int src_id, int dst_id,
     d.operation     = op;
     d.granted_caps  = channels[src_id].cap_mask;
     d.required_caps = required_caps_for_op(op);
-    /* J5: caller's lineage at deny time. current_task may be NULL during
-     * pre-task_init self-tests; surface TASK_PARENT_NONE in that case so
-     * the encoder can distinguish "no caller" from a real kernel-rooted
-     * task. */
-    d.parent_task_id = (current_task != NULL)
-                       ? current_task->parent_task_id
-                       : TASK_PARENT_NONE;
-    d.lineage_depth  = 0u;
-    d.sibling_count  = 0u;
+    /* J5/J6: caller's lineage at deny time. current_task may be NULL
+     * during pre-task_init self-tests; surface TASK_PARENT_NONE +
+     * depth/sibling 0 in that case so the encoder can distinguish
+     * "no caller" from a real kernel-rooted task. */
+    if (current_task != NULL) {
+        d.parent_task_id = current_task->parent_task_id;
+        d.lineage_depth  = lineage_depth_of(current_task);
+        d.sibling_count  = sibling_count_of(current_task);
+    } else {
+        d.parent_task_id = TASK_PARENT_NONE;
+        d.lineage_depth  = 0u;
+        d.sibling_count  = 0u;
+    }
     d._pad2[0]       = 0u;
     d._pad2[1]       = 0u;
     auditor_deny(&d);
