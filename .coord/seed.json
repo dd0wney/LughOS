@@ -1,0 +1,68 @@
+{
+  "project": "lughos",
+  "comment": "Phase 3 of LughOS — task lifecycle (A), transactional storage (C), MMU/memory protection (B), JEPA-prep telemetry (J). Phase 3 D (wire SYS_IPC_SEND under user_init_task) shipped previously as commit 6552229 and is intentionally not included here.",
+  "tasks": [
+    {"id": "A1-sched-unify",          "track": "task-lifecycle", "status": "pending", "title": "Unify scheduler task table with kernel task table — drop rr_tasks[64], rr_* operates on kernel/sched/task.c table"},
+    {"id": "A2-task-stacks",          "track": "task-lifecycle", "status": "pending", "title": "Per-task kernel stacks: static kernel_stacks[MAX_RUNNABLE][16384] + task_t.kernel_stack_top (struct grows)"},
+    {"id": "A3-task-syscalls",        "track": "task-lifecycle", "status": "pending", "title": "SYS_CREATE_TASK + SYS_YIELD + repurpose SYS_EXIT to mark TERMINATED + reschedule"},
+    {"id": "A4-context-switch",       "track": "task-lifecycle", "status": "pending", "title": "Preemptive context switch on PIT/SP804 tick: arm_/x86_context_switch + current_task swap inside the switch with IRQs masked"},
+    {"id": "A5-test-lifecycle",       "track": "task-lifecycle", "status": "pending", "title": "test_task_lifecycle: spawn 2-3 children, yield round-robin, deliberate SYS_EXIT reduces live count; move test_task_caps above the IRQ unmask"},
+
+    {"id": "C1-storage-ops",          "track": "storage",        "status": "pending", "title": "storage_ops_t interface mirroring scheduler_ops_t + memory_storage_ops concrete instance; paths treated as opaque keys (no FS)"},
+    {"id": "C2-txn-log",              "track": "storage",        "status": "pending", "title": "Bounded global txn_log[TXN_LOG_ENTRIES=256] ring with task_id field; overflow → auditor OVERFLOW record"},
+    {"id": "C3-gen-id-atomic",        "track": "storage",        "status": "pending", "title": "generate_transaction_id() atomic via IPL raise (ARM) / cli-sti (x86); panic on uint64 wrap"},
+    {"id": "C4-checkpoint",           "track": "storage",        "status": "pending", "title": "create_checkpoint / restore_checkpoint via reserved checkpoint_slots[][] byte arrays keyed by path string"},
+    {"id": "C5-test-storage",         "track": "storage",        "status": "pending", "title": "test_transactional_storage: 1000-id distinctness test + 4KB checkpoint round-trip verification"},
+
+    {"id": "B1-frame-allocator",      "track": "mmu",            "status": "pending", "title": "Page frame allocator with static frame_table[NFRAMES]; per-arch device window identification"},
+    {"id": "B2-x86-paging",           "track": "mmu",            "status": "pending", "title": "Real x86 2-level page tables: kernel PD at boot, identity-map kernel+VGA+PIC+PIT, load CR3 + enable CR0.PG (atomic single commit)"},
+    {"id": "B3-arm-mmu",              "track": "mmu",            "status": "pending", "title": "ARMv5 single TTBR0 page tables: identity-map kernel+stacks+devices+vectors, DACR=0x55555555, caches+TLB invalidate, write TTBR0, SCTLR.M (atomic — half-MMU is unbootable)"},
+    {"id": "B4-page-dir",             "track": "mmu",            "status": "pending", "title": "Real allocate_page_dir + map_user_space + TLB invalidation; task_t.page_dir_phys; context switch loads CR3/TTBR0 from new task; update SYS_WRITE/SYS_IPC_SEND user-VA range to match new mappings"},
+    {"id": "B5-riscv-stub",           "track": "mmu",            "status": "pending", "title": "RISC-V MMU stub hooks for compile parity — make riscv passes; runtime path no-op"},
+    {"id": "B6-test-mmu",             "track": "mmu",            "status": "pending", "title": "test_mmu_protection: map user page read-only, deliberate write triggers data abort, kernel handler logs MMU_FAULT and terminates the offending task without taking the system down"},
+
+    {"id": "J0-parent-task-id",       "track": "jepa-prep",      "status": "pending", "title": "Record parent_task_id on task_t at create_task time; sentinel 0xFFFFFFFF for kernel_task (no parent)"},
+    {"id": "J1-task-create-event",    "track": "jepa-prep",      "status": "pending", "title": "AUDITOR_REC_TASK_CREATE record type (=4); bump AUDITOR_TELEMETRY_VERSION; emit from create_task; update read_telemetry.py decoder atomically"},
+    {"id": "J2-channel-create-event", "track": "jepa-prep",      "status": "pending", "title": "AUDITOR_REC_CHAN_CREATE record type (=5); emit from ipc_create_channel; fields: channel_id, owner_task_id, cap_mask, domain, protocol"},
+    {"id": "J3-channel-connect-event","track": "jepa-prep",      "status": "pending", "title": "AUDITOR_REC_CHAN_CONNECT record type (=6); emit from ipc_connect on success; fields: src_channel, dst_channel, src_domain, dst_domain"},
+    {"id": "J4-task-exit-event",      "track": "jepa-prep",      "status": "pending", "title": "AUDITOR_REC_TASK_EXIT record type (=7); emit from SYS_EXIT handler (depends on A3 making SYS_EXIT a real lifecycle event)"},
+    {"id": "J5-deny-parent",          "track": "jepa-prep",      "status": "pending", "title": "Include parent_task_id in DENY records (auditor_deny_info_t gains field); update emit_deny + emit_create_deny + Python decoder"},
+    {"id": "J6-deny-depth-siblings",  "track": "jepa-prep",      "status": "pending", "title": "Add lineage_depth + sibling_count to DENY records; bounded ancestor walk + bounded sibling scan; encodes structural position for the JEPA encoder"},
+    {"id": "J7-domain-matrix",        "track": "jepa-prep",      "status": "pending", "title": "Domain transition matrix replaces flat CAP_CROSS_DOMAIN; static domain_edges[MAX_DOMAINS] bitmap (identity default); CAP_CROSS_DOMAIN survives as bypass; emit AUDITOR_REC_DOMAIN_EDGE on policy mutation"},
+    {"id": "J8-test-completeness",    "track": "jepa-prep",      "status": "pending", "title": "test_telemetry_completeness: validates the exact expected set of structural records appears in the stream for a known boot sequence; counts MSG/DENY/TASK_CREATE/CHAN_CREATE/CHAN_CONNECT/TASK_EXIT"},
+    {"id": "J9-graph-replay",         "track": "jepa-prep",      "status": "pending", "title": "scripts/reconstruct_graph.py: consume event stream → reconstruct task+channel+domain graph at any timestamp; DOT output for sanity-check visualization"}
+  ],
+  "deps": [
+    {"from": "A2-task-stacks",          "to": "A1-sched-unify"},
+    {"from": "A3-task-syscalls",        "to": "A2-task-stacks"},
+    {"from": "A4-context-switch",       "to": "A3-task-syscalls"},
+    {"from": "A5-test-lifecycle",       "to": "A4-context-switch"},
+
+    {"from": "C2-txn-log",              "to": "C1-storage-ops"},
+    {"from": "C3-gen-id-atomic",        "to": "C2-txn-log"},
+    {"from": "C4-checkpoint",           "to": "C3-gen-id-atomic"},
+    {"from": "C5-test-storage",         "to": "C4-checkpoint"},
+
+    {"from": "B2-x86-paging",           "to": "B1-frame-allocator"},
+    {"from": "B3-arm-mmu",              "to": "B1-frame-allocator"},
+    {"from": "B4-page-dir",             "to": "B2-x86-paging"},
+    {"from": "B4-page-dir",             "to": "B3-arm-mmu"},
+    {"from": "B4-page-dir",             "to": "A4-context-switch"},
+    {"from": "B5-riscv-stub",           "to": "B1-frame-allocator"},
+    {"from": "B6-test-mmu",             "to": "B4-page-dir"},
+
+    {"from": "J0-parent-task-id",       "to": "A1-sched-unify"},
+    {"from": "J1-task-create-event",    "to": "J0-parent-task-id"},
+    {"from": "J4-task-exit-event",      "to": "A3-task-syscalls"},
+    {"from": "J5-deny-parent",          "to": "J0-parent-task-id"},
+    {"from": "J6-deny-depth-siblings",  "to": "J5-deny-parent"},
+    {"from": "J8-test-completeness",    "to": "J1-task-create-event"},
+    {"from": "J8-test-completeness",    "to": "J2-channel-create-event"},
+    {"from": "J8-test-completeness",    "to": "J3-channel-connect-event"},
+    {"from": "J8-test-completeness",    "to": "J4-task-exit-event"},
+    {"from": "J8-test-completeness",    "to": "J5-deny-parent"},
+    {"from": "J8-test-completeness",    "to": "J6-deny-depth-siblings"},
+    {"from": "J8-test-completeness",    "to": "J7-domain-matrix"},
+    {"from": "J9-graph-replay",         "to": "J8-test-completeness"}
+  ]
+}
