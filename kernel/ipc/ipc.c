@@ -4,6 +4,7 @@
 #include "crypto.h"
 #include "auditor.h"
 #include "capabilities.h"
+#include "domain_graph.h"
 
 #define MAX_IPC_CHANNELS 16
 
@@ -103,12 +104,15 @@ int ipc_create_channel(uint32_t security_level, uint32_t domain,
         emit_create_deny(cap_mask, domain, DENY_CAP_ESCALATION, protocol);
         return -4;
     }
-    /* Cross-domain channel creation requires CAP_CROSS_DOMAIN in the
-     * caller — same rule as ipc_connect, applied at the earlier step. */
+    /* Cross-domain channel creation: require either an explicit edge in
+     * the domain transition matrix, or CAP_CROSS_DOMAIN as a bypass
+     * override for kernel-trusted tasks. The matrix is the normal path;
+     * CAP_CROSS_DOMAIN is the escape hatch for the root-of-trust task. */
     if (domain != current_task->domain &&
+        !domain_edge_allowed(current_task->domain, domain) &&
         !(current_task->cap_mask & CAP_CROSS_DOMAIN)) {
         log_message(LOG_ERROR,
-            "ipc_create_channel: cross-domain denied (task_dom=%u, ch_dom=%u)\n",
+            "ipc_create_channel: cross-domain denied (task_dom=%u, ch_dom=%u, no edge, no CAP_CROSS_DOMAIN)\n",
             current_task->domain, domain);
         emit_create_deny(cap_mask, domain, DENY_DOMAIN_CREATE, protocol);
         return -5;
@@ -180,9 +184,16 @@ int ipc_connect(int src_id, int dst_id) {
         return -1;
     }
     if (channels[src_id].domain != channels[dst_id].domain) {
-        if (!(channels[src_id].cap_mask & CAP_CROSS_DOMAIN)) {
+        /* Two layers of authorisation must both fail to deny:
+         *   (1) the domain matrix has no explicit edge src_dom -> dst_dom
+         *   (2) AND the src channel doesn't hold CAP_CROSS_DOMAIN bypass.
+         * Channel domains (not task domain) drive the matrix lookup
+         * because the src channel is the established gate at this site. */
+        if (!domain_edge_allowed(channels[src_id].domain,
+                                 channels[dst_id].domain) &&
+            !(channels[src_id].cap_mask & CAP_CROSS_DOMAIN)) {
             log_message(LOG_ERROR,
-                "ipc_connect: domain violation ch%d(dom=%u) -> ch%d(dom=%u)\n",
+                "ipc_connect: domain violation ch%d(dom=%u) -> ch%d(dom=%u) (no edge, no CAP_CROSS_DOMAIN)\n",
                 src_id, channels[src_id].domain,
                 dst_id, channels[dst_id].domain);
             emit_deny(src_id, dst_id, 0, DENY_DOMAIN, 0);

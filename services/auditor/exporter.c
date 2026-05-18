@@ -257,6 +257,44 @@ void auditor_chan_connect(uint32_t src_channel_id,
                              dst_cap_mask);
 }
 
+/* DOMAIN_EDGE: policy mutation event. The full uint32 src/dst are stored
+ * in operation/checksum (current MAX_DOMAINS=8 fits in 8 bits, but this
+ * leaves room to grow without another version bump). */
+static void emit_domain_edge_record(uint32_t src_domain,
+                                    uint32_t dst_domain,
+                                    uint32_t added) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_DOMAIN_EDGE);
+    rec.priority   = 0;
+    rec.src_domain = (uint8_t)(src_domain & 0xFFu);
+    rec.protocol   = 0;
+    rec.channel_id = (uint8_t)(dst_domain & 0xFFu);
+    rec.operation  = src_domain;
+    rec.checksum   = dst_domain;
+
+    uint32_t vals[4];
+    vals[0] = added;
+    vals[1] = 0u;
+    vals[2] = 0u;
+    vals[3] = 0u;
+    uint32_t i;
+    for (i = 0; i < 4u; i++) {
+        rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
+        rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
+        rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
+        rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
+    }
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_domain_edge(uint32_t src_domain,
+                         uint32_t dst_domain,
+                         uint32_t added) {
+    if (!auditor_enabled)
+        return;
+    emit_domain_edge_record(src_domain, dst_domain, added);
+}
+
 /* ── DENY record emission ────────────────────────────────────────── */
 
 void auditor_deny(const auditor_deny_info_t *info) {

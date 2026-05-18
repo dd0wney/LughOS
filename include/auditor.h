@@ -20,6 +20,7 @@
 #define AUDITOR_REC_DENY         3u  /* capability/domain denied  */
 #define AUDITOR_REC_CHAN_CREATE  5u  /* IPC channel created       */
 #define AUDITOR_REC_CHAN_CONNECT 6u  /* IPC channel connected     */
+#define AUDITOR_REC_DOMAIN_EDGE  8u  /* domain matrix mutation    */
 
 /* Fixed-size telemetry record emitted on COM2.
  * 44 bytes packed. Python struct format: '<IHHQBBBBII16s'
@@ -52,6 +53,14 @@
  *                denials use the existing DENY record. Together
  *                CREATE+CONNECT let the encoder reconstruct the channel
  *                graph (nodes + edges) from telemetry alone.
+ *   DOMAIN_EDGE: priority=0, src_domain=src (low 8), protocol=0,
+ *                channel_id=dst (low 8),
+ *                operation=src (full uint32), checksum=dst (full uint32),
+ *                payload_hash[0..3]=added (1 = edge added; reserved for
+ *                future "removed" events), payload_hash[4..15]=zeros.
+ *                Emitted by every successful domain_edge_set so the
+ *                JEPA encoder sees policy mutations as first-class
+ *                events.
  */
 typedef struct __attribute__((packed)) {
     uint32_t magic;           /* AUDITOR_MAGIC                        */
@@ -117,5 +126,11 @@ void auditor_chan_connect(uint32_t src_channel_id,
                           uint32_t dst_channel_id,
                           uint32_t dst_domain,
                           uint32_t dst_cap_mask);
+
+/* added=1 → edge inserted (current API). Reserved for a future
+ * "removed" mutation if/when the policy gains a remove path. */
+void auditor_domain_edge(uint32_t src_domain,
+                         uint32_t dst_domain,
+                         uint32_t added);
 
 #endif /* AUDITOR_H */

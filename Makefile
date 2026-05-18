@@ -81,6 +81,7 @@ KERNEL_COMMON_SRC = \
   kernel/mm/memory_utils.c \
   kernel/fs/storage.c \
   kernel/ipc/ipc.c \
+  kernel/security/domain_graph.c \
   kernel/drivers/console.c \
   kernel/sched/priority.c \
   kernel/sched/task.c \
