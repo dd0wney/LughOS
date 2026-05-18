@@ -99,13 +99,53 @@ void arm_irq_dispatch(void) {
     }
 }
 
-/* ── IPL stubs — Phase 2 step 2 ────────────────────────────────────
- * The cross-arch interrupt.h declares spl* and hw_get_jiffies; we
- * keep no-op stubs here until the IPL → VIC mask mapping is wired.
- * hw_get_jiffies lives in timer.c once SP804 is online; until then
- * it returns 0 (the value most callers tolerate as "unset"). */
-spl_t splraise(uint32_t ipl) { (void)ipl; return 0; }
-void  splx(spl_t prev)       { (void)prev; }
-spl_t splhigh(void)          { return 0; }
-spl_t splclock(void)         { return 0; }
-spl_t spl0(void)             { return 0; }
+/* ── IPL → CPSR.I mapping ─────────────────────────────────────────
+ *
+ * Coarse-grained: any non-NONE IPL sets CPSR.I (mask all IRQs at the
+ * CPU). Future refinement: map IPL_TTY/CLOCK/HIGH to specific VIC
+ * INTENABLE/INTENCLEAR patterns. The current implementation honors
+ * the contract — splraise returns the prior I-bit, splx restores it
+ * — which is what callers depend on; the fine-grained breakdown is
+ * an optimization, not a correctness requirement.
+ *
+ * spl_t encodes the prior CPSR.I bit (0 = was enabled, 1 = was
+ * masked). On ARMv5 we read/modify/write CPSR via mrs/msr; the
+ * ARMv6+ `cpsie/cpsid i` mnemonic isn't available on ARM926EJ-S. */
+
+static inline uint32_t cpsr_read(void) {
+    uint32_t v;
+    __asm__ volatile("mrs %0, cpsr" : "=r"(v));
+    return v;
+}
+
+static inline void cpsr_write_c(uint32_t v) {
+    __asm__ volatile("msr cpsr_c, %0" :: "r"(v) : "memory");
+}
+
+spl_t splraise(uint32_t ipl) {
+    uint32_t cpsr = cpsr_read();
+    spl_t prev = (spl_t)((cpsr >> 7) & 1u);
+    if (ipl != IPL_NONE) {
+        cpsr_write_c(cpsr | 0x80u);   /* mask IRQs */
+    }
+    return prev;
+}
+
+void splx(spl_t prev) {
+    uint32_t cpsr = cpsr_read();
+    if (prev != 0u) cpsr |=  0x80u;   /* was masked: keep masked */
+    else            cpsr &= ~0x80u;   /* was enabled: unmask */
+    cpsr_write_c(cpsr);
+}
+
+spl_t splhigh(void)  { return splraise(IPL_HIGH);  }
+spl_t splclock(void) { return splraise(IPL_CLOCK); }
+
+spl_t spl0(void) {
+    /* Lower to IPL_NONE: unconditionally unmask. Returns prior I-bit
+     * so the matching splx() can restore exactly. */
+    uint32_t cpsr = cpsr_read();
+    spl_t prev = (spl_t)((cpsr >> 7) & 1u);
+    cpsr_write_c(cpsr & ~0x80u);
+    return prev;
+}
