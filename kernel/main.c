@@ -643,6 +643,11 @@ void kmain(void) {
 #endif
 
 #if defined(__arm__)
+    // Bring up the PL190 VIC. Sources stay masked at the VIC until each
+    // driver calls irq_register_handler; the CPU I-bit stays set until a
+    // later "sti-equivalent" once timer + IPL are wired (Phase 2 step 2).
+    extern void vic_init(void);
+    vic_init();
     // Initialize ARM system call interface
     init_syscall_arm();
 #elif defined(__riscv)
