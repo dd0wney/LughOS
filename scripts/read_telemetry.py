@@ -45,6 +45,18 @@ For DOMAIN_EDGE records (type=8, v2+), the layout is:
   operation     = src_domain (full uint32)
   checksum      = dst_domain (full uint32)
   payload_hash  = [added:32][zeros:96]   (added=1 means edge inserted)
+
+For TASK_CREATE records (type=4, v2+ J1), the layout is:
+  priority      = task.priority (clamped to uint8)
+  src_domain    = task.domain (low 8)
+  operation     = task.task_id (full uint32)
+  checksum      = task.parent_task_id (0xFFFFFFFF = ROOT)
+  payload_hash  = [cap_mask:32][domain:32][stack_top:32][zeros:32]
+
+For TASK_EXIT records (type=7, v2+ J4), the layout is:
+  operation     = task_id (full uint32)
+  checksum      = (uint32_t)exit_code   (display as signed int32)
+  payload_hash  = [zeros:128]
 """
 
 import argparse
@@ -61,8 +73,13 @@ RECORD_SIZE = struct.calcsize(RECORD_FMT)
 assert RECORD_SIZE == 44, f"Format mismatch: expected 44 bytes, got {RECORD_SIZE}"
 
 REC_TYPE_NAME = {0: "MSG", 1: "OVERFLOW", 2: "HEARTBEAT", 3: "DENY",
+                 4: "TASK_CREATE",
                  5: "CHAN_CREATE", 6: "CHAN_CONNECT",
+                 7: "TASK_EXIT",
                  8: "DOMAIN_EDGE"}
+
+# Mirrors include/lugh.h TASK_PARENT_NONE — kernel root task.
+TASK_PARENT_NONE = 0xFFFFFFFF
 PRIO_NAME     = {0: "HIGH", 1: "MED", 2: "LOW"}
 PROTO_NAME    = {1: "PAIR", 2: "PUB", 3: "SUB", 4: "REQ", 5: "REP",
                  6: "PUSH", 7: "PULL", 8: "BUS", 9: "SURV", 10: "RESP"}
@@ -147,6 +164,32 @@ def format_record(r: dict) -> str:
         return (
             f"[j={j:>7}]  DOMAIN_EDGE "
             f"src_dom={src_dom} -> dst_dom={dst_dom} ({verb})"
+        )
+
+    if r["type"] == 4:  # TASK_CREATE — lineage event (v2+ J1)
+        raw_hash = bytes.fromhex(r["payload_hash"])
+        cap_mask    = _unpack_le32(raw_hash, 0)
+        full_domain = _unpack_le32(raw_hash, 4)
+        stack_top   = _unpack_le32(raw_hash, 8)
+        task_id     = r["operation"]
+        parent_id   = r["checksum"]
+        parent_str  = "ROOT" if parent_id == TASK_PARENT_NONE else str(parent_id)
+        return (
+            f"[j={j:>7}]  TASK_CREATE "
+            f"task={task_id} parent={parent_str} "
+            f"caps=0x{cap_mask:X}[{caps_str(cap_mask)}] "
+            f"domain={full_domain} prio={r['priority']} stack_top=0x{stack_top:X}"
+        )
+
+    if r["type"] == 7:  # TASK_EXIT — lifecycle event (v2+ J4)
+        task_id   = r["operation"]
+        exit_code = r["checksum"]
+        # Exit code is conceptually int32; display signed for readability.
+        if exit_code & 0x80000000:
+            exit_code -= 0x100000000
+        return (
+            f"[j={j:>7}]  TASK_EXIT   "
+            f"task={task_id} exit_code={exit_code}"
         )
 
     if r["type"] == 6:  # CHAN_CONNECT — edge between two channels (v2+)

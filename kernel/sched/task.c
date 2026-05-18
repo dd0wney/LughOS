@@ -1,5 +1,6 @@
 #include "lugh.h"
 #include "capabilities.h"
+#include "auditor.h"
 
 /* Static task table per NASA Power of Ten rule 5 (no dynamic allocation
  * after init) and rule 2 (statically determinable upper bound). The
@@ -170,5 +171,12 @@ int create_task(task_t* spec) {
         "Created task id=%u priority=%d caps=0x%X domain=%u stack_top=0x%X parent=%u\n",
         t->task_id, t->priority, t->cap_mask, t->domain, t->kernel_stack_top,
         t->parent_task_id);
+
+    /* TASK_CREATE telemetry (Phase 3 J1). Synchronous emission — no ring
+     * — because lineage events are rare and the JEPA encoder needs them
+     * to land strictly before any subsequent event that references the
+     * new task_id. */
+    auditor_task_create(t->task_id, t->parent_task_id, t->cap_mask,
+                        t->domain, t->priority, t->kernel_stack_top);
     return 0;
 }

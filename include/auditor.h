@@ -18,8 +18,10 @@
 #define AUDITOR_REC_OVERFLOW     1u  /* ring dropped N messages   */
 #define AUDITOR_REC_HEARTBEAT    2u  /* 1-second keepalive        */
 #define AUDITOR_REC_DENY         3u  /* capability/domain denied  */
+#define AUDITOR_REC_TASK_CREATE  4u  /* task spawned via create_task */
 #define AUDITOR_REC_CHAN_CREATE  5u  /* IPC channel created       */
 #define AUDITOR_REC_CHAN_CONNECT 6u  /* IPC channel connected     */
+#define AUDITOR_REC_TASK_EXIT    7u  /* task terminated via SYS_EXIT */
 #define AUDITOR_REC_DOMAIN_EDGE  8u  /* domain matrix mutation    */
 
 /* Fixed-size telemetry record emitted on COM2.
@@ -33,6 +35,16 @@
  *                operation=attempted OP_*, checksum=[reason:8][dst_domain:8][dst_channel:8][rsvd:8],
  *                payload_hash[0..3]=granted_caps, [4..7]=required_caps,
  *                [8..11]=dst_channel_id (0xFFFFFFFF if none), [12..15]=zeros
+ *   TASK_CREATE: priority=task.priority (clamped to uint8), src_domain=task.domain (low 8),
+ *                protocol=0, channel_id=0,
+ *                operation=task.task_id, checksum=task.parent_task_id,
+ *                payload_hash[0..3]=task.cap_mask,
+ *                payload_hash[4..7]=task.domain (full uint32 — handles >255 domains),
+ *                payload_hash[8..11]=task.kernel_stack_top,
+ *                payload_hash[12..15]=zeros.
+ *                Emitted synchronously at the end of create_task on
+ *                the success path. Together with TASK_EXIT this lets
+ *                the encoder track task lifetimes without polling.
  *   CHAN_CREATE: priority=0, src_domain=channel.domain (low 8),
  *                protocol=channel.protocol, channel_id=channel.id,
  *                operation=channel.cap_mask, checksum=channel.owner_task_id,
@@ -61,6 +73,13 @@
  *                Emitted by every successful domain_edge_set so the
  *                JEPA encoder sees policy mutations as first-class
  *                events.
+ *   TASK_EXIT:   priority=0, src_domain=0, protocol=0, channel_id=0,
+ *                operation=task_id, checksum=(uint32_t)exit_code,
+ *                payload_hash[0..15]=zeros.
+ *                Emitted synchronously from the SYS_EXIT syscall before
+ *                the TASK_TERMINATED transition, so the caller's task_id
+ *                is still queryable. Pairs with TASK_CREATE so the
+ *                encoder can compute task lifetimes from telemetry alone.
  */
 typedef struct __attribute__((packed)) {
     uint32_t magic;           /* AUDITOR_MAGIC                        */
@@ -132,5 +151,27 @@ void auditor_chan_connect(uint32_t src_channel_id,
 void auditor_domain_edge(uint32_t src_domain,
                          uint32_t dst_domain,
                          uint32_t added);
+
+/* Task lifecycle events — emitted synchronously (no ring) so the JEPA
+ * encoder sees TASK_CREATE strictly before any subsequent event that
+ * references task_id, and TASK_EXIT strictly before the scheduler
+ * transition that retires the task.
+ *
+ * task_id          — newly-allocated id (TASK_CREATE) or terminating id (TASK_EXIT)
+ * parent_task_id   — current_task->task_id at create time
+ * cap_mask         — effective caps after bounded-narrowing
+ * domain           — full 32-bit security domain
+ * priority         — task's scheduling priority (passed as int; clamped to uint8 on the wire)
+ * kernel_stack_top — physical kernel stack TOP (0 if exceeded MAX_RUNNABLE)
+ * exit_code        — caller-supplied SYS_EXIT argument
+ */
+void auditor_task_create(uint32_t task_id,
+                         uint32_t parent_task_id,
+                         uint32_t cap_mask,
+                         uint32_t domain,
+                         int      priority,
+                         uint32_t kernel_stack_top);
+
+void auditor_task_exit(uint32_t task_id, int exit_code);
 
 #endif /* AUDITOR_H */

@@ -295,6 +295,67 @@ void auditor_domain_edge(uint32_t src_domain,
     emit_domain_edge_record(src_domain, dst_domain, added);
 }
 
+/* TASK_CREATE: lineage event. Field reuse mirrors auditor.h:
+ *   priority      = task.priority (clamped to uint8)
+ *   src_domain    = low 8 bits of task.domain
+ *   protocol      = 0   (tasks have no protocol)
+ *   channel_id    = 0
+ *   operation     = task.task_id      (full uint32)
+ *   checksum      = task.parent_task_id (TASK_PARENT_NONE for kernel root)
+ *   payload_hash  = [cap_mask:32][domain:32][stack_top:32][zeros:32]
+ *
+ * Together with TASK_EXIT (type=7) this gives the JEPA encoder enough
+ * to reconstruct task lifetimes and the lineage tree without polling
+ * the kernel task table. */
+static void emit_task_create_record(uint32_t task_id,
+                                    uint32_t parent_task_id,
+                                    uint32_t cap_mask,
+                                    uint32_t domain,
+                                    int      priority,
+                                    uint32_t kernel_stack_top) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_TASK_CREATE);
+    /* Priority is signed in task_t but always small and non-negative
+     * by convention (0=highest, 10=lowest). Clamp defensively so a
+     * future regression that lets a negative slip through doesn't
+     * silently become 0xFF on the wire. */
+    int p = priority;
+    if (p < 0) p = 0;
+    if (p > 255) p = 255;
+    rec.priority   = (uint8_t)p;
+    rec.src_domain = (uint8_t)(domain & 0xFFu);
+    rec.protocol   = 0;
+    rec.channel_id = 0;
+    rec.operation  = task_id;
+    rec.checksum   = parent_task_id;
+
+    uint32_t vals[4];
+    vals[0] = cap_mask;
+    vals[1] = domain;
+    vals[2] = kernel_stack_top;
+    vals[3] = 0u;
+    uint32_t i;
+    for (i = 0; i < 4u; i++) {
+        rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
+        rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
+        rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
+        rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
+    }
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_task_create(uint32_t task_id,
+                         uint32_t parent_task_id,
+                         uint32_t cap_mask,
+                         uint32_t domain,
+                         int      priority,
+                         uint32_t kernel_stack_top) {
+    if (!auditor_enabled)
+        return;
+    emit_task_create_record(task_id, parent_task_id, cap_mask, domain,
+                            priority, kernel_stack_top);
+}
+
 /* ── DENY record emission ────────────────────────────────────────── */
 
 void auditor_deny(const auditor_deny_info_t *info) {
