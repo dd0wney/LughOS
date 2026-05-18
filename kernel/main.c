@@ -592,6 +592,158 @@ void test_nng_patterns(void) {
                     fail, pass, pass + fail);
 }
 
+/* Transactional-storage end-to-end test (storage track, C5).
+ *
+ * Subtest 1: 1000 generate_transaction_id() calls — verifies strict
+ *            monotonicity and distinctness (IPL bracketing in C3).
+ * Subtest 2: register a 4 KiB buffer with a known byte pattern,
+ *            create_checkpoint, mutate the source, restore_checkpoint,
+ *            assert byte-for-byte match (round-trip of C4).
+ * Subtest 3: overflow the bounded txn log (1000 writes vs 256 slots)
+ *            and assert ipc_ring.overflow is bumped — the cross-
+ *            subsystem seam from C2 that the auditor exporter
+ *            converts to an OVERFLOW telemetry record on its next
+ *            tick. We drive auditor_tick() explicitly at the end so
+ *            the record lands on COM2 / PL011 UART1 before the next
+ *            test path runs. */
+static void test_transactional_storage(void) {
+    log_message(LOG_INFO, "Testing transactional storage...\n");
+    int pass = 0;
+
+    /* ── Subtest 1: 1000 distinct monotonic IDs ─────────────────── */
+    {
+        uint64_t prev = 0u;
+        int ok = 1;
+        int i;
+        for (i = 0; i < 1000; i++) {
+            uint64_t id = generate_transaction_id();
+            if (id <= prev) { ok = 0; break; }
+            prev = id;
+        }
+        if (ok) {
+            log_message(LOG_INFO,
+                "Storage test 1 PASS: 1000/1000 distinct monotonic ids\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Storage test 1 FAIL: monotonicity broke at i=%d\n", i);
+        }
+    }
+
+    /* ── Subtest 2: 4 KiB round-trip via checkpoint/restore ─────── */
+    {
+        static uint8_t test_buf[CHECKPOINT_SIZE];
+        size_t i;
+        for (i = 0u; i < CHECKPOINT_SIZE; i++) {
+            test_buf[i] = (uint8_t)(i & 0xFFu);   /* 0x00,0x01,...,0xFF,0x00,... */
+        }
+
+        int rv = storage_register_buffer("src_buf", test_buf, CHECKPOINT_SIZE);
+        if (rv != 0) {
+            log_message(LOG_ERROR,
+                "Storage test 2 FAIL: register failed (rv=%d)\n", rv);
+            goto subtest3;
+        }
+
+        if (create_checkpoint("src_buf", "ckpt_a") != 0) {
+            log_message(LOG_ERROR, "Storage test 2 FAIL: create_checkpoint\n");
+            goto subtest3;
+        }
+
+        /* Corrupt the source — restore must overwrite this. */
+        for (i = 0u; i < CHECKPOINT_SIZE; i++) {
+            test_buf[i] = 0xCCu;
+        }
+
+        if (restore_checkpoint("ckpt_a", "src_buf") != 0) {
+            log_message(LOG_ERROR, "Storage test 2 FAIL: restore_checkpoint\n");
+            goto subtest3;
+        }
+
+        size_t mismatches = 0u;
+        for (i = 0u; i < CHECKPOINT_SIZE; i++) {
+            if (test_buf[i] != (uint8_t)(i & 0xFFu)) mismatches++;
+        }
+        if (mismatches == 0u) {
+            log_message(LOG_INFO,
+                "Storage test 2 PASS: 4096/4096 bytes restored\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Storage test 2 FAIL: %u byte mismatches\n",
+                (unsigned int)mismatches);
+        }
+    }
+
+subtest3:
+    /* ── Subtest 3: deliberate txn-log overflow ─────────────────── */
+    {
+        /* Drain any pending overflow + entries from earlier subtests
+         * (create_checkpoint and restore_checkpoint each emit one
+         * txn_log entry) so we're measuring this subtest's delta
+         * against a known baseline. The auditor exporter consumes
+         * ring entries but not the txn_log itself, so we record the
+         * current txn_log depth and recompute the expected drop count
+         * from it. */
+        auditor_tick();
+        uint32_t baseline_overflow = ipc_ring.overflow;
+        uint32_t baseline_local    = txn_log_get_overflow();
+        uint32_t baseline_depth    = txn_log_get_depth();
+
+        /* TXN_LOG_ENTRIES is 256; write 1000 — guarantees overflow.
+         * Expected drops = max(0, 1000 - (256 - baseline_depth)). */
+        const uint32_t writes = 1000u;
+        const uint32_t capacity = 256u;
+        const uint32_t free_slots = (baseline_depth < capacity)
+            ? (capacity - baseline_depth) : 0u;
+        const uint32_t expected_drops = (writes > free_slots)
+            ? (writes - free_slots) : 0u;
+
+        uint32_t i;
+        for (i = 0u; i < writes; i++) {
+            txn_log_entry_t e;
+            e.txn_id    = generate_transaction_id();
+            e.task_id   = 0u;
+            e.operation = OP_WRITE;
+            e.checksum  = 0u;
+            e.key[0]    = 'k';
+            e.key[1]    = '\0';
+            e.value[0]  = 'v';
+            e.value[1]  = '\0';
+            (void)log_transaction(&e);
+        }
+
+        uint32_t local_delta    = txn_log_get_overflow() - baseline_local;
+        uint32_t exporter_delta = ipc_ring.overflow      - baseline_overflow;
+
+        /* Both counters must witness the same drop count, equal to
+         * the expected_drops derived from baseline_depth. */
+        if (local_delta == expected_drops &&
+            exporter_delta == expected_drops &&
+            expected_drops > 0u) {
+            log_message(LOG_INFO,
+                "Storage test 3 PASS: ring overflow=%u (local) / %u (exporter), expected=%u\n",
+                (unsigned int)local_delta,
+                (unsigned int)exporter_delta,
+                (unsigned int)expected_drops);
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Storage test 3 FAIL: expected=%u, got local=%u exporter=%u (baseline_depth=%u)\n",
+                (unsigned int)expected_drops,
+                (unsigned int)local_delta,
+                (unsigned int)exporter_delta,
+                (unsigned int)baseline_depth);
+        }
+
+        /* Flush — the auditor will emit an OVERFLOW record on COM2 /
+         * PL011 UART1, captured by the QEMU -serial file binding. */
+        auditor_tick();
+    }
+
+    log_message(LOG_INFO, "Storage tests: %d/3 passed\n", pass);
+}
+
 /**
  * @brief Initialize the kernel and its subsystems
  * 
@@ -682,8 +834,9 @@ void kmain(void) {
     test_auditor();
     test_ipc_enforcement();
     test_task_caps();
+    test_transactional_storage();
     test_nng_patterns();
-    
+
     // Test the update system
     test_update_system();
     
