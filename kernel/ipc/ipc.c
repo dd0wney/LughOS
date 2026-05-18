@@ -132,6 +132,17 @@ int ipc_create_channel(uint32_t security_level, uint32_t domain,
     channels[channel_id].domain         = domain;
     channels[channel_id].cap_mask       = cap_mask;
     channels[channel_id].owner_task_id  = current_task->task_id;
+
+    /* Structural event: channel exists from here on. Emit before the
+     * log line so a JEPA replay sees CHAN_CREATE strictly before any
+     * subsequent MSG/DENY records that reference this channel_id. */
+    auditor_chan_create((uint32_t)channel_id,
+                        current_task->task_id,
+                        cap_mask,
+                        domain,
+                        security_level,
+                        (uint32_t)channels[channel_id].socket.protocol);
+
     log_message(LOG_INFO,
         "Created IPC channel %d (domain: %u, caps: 0x%X, owner_task=%u)\n",
         channel_id, domain, cap_mask, current_task->task_id);
