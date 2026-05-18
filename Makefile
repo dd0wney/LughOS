@@ -103,9 +103,10 @@ STORAGE_SRC = services/storage/storage.c services/storage/transactions.c
 UPDATE_SRC = services/update/update.c services/update/sandbox.c
 AUDITOR_SRC = services/auditor/exporter.c kernel/ring_buffer.c
 X86_BOOT_SRC = kernel/arch/x86/boot_x86.S kernel/arch/x86/enter_user_mode.S \
-               kernel/arch/x86/gdt_load.S kernel/arch/x86/isr_stubs.S
+               kernel/arch/x86/gdt_load.S kernel/arch/x86/isr_stubs.S \
+               kernel/arch/x86/context_switch.S
 ARM_BOOT_SRC = kernel/arch/arm/boot_arm.S kernel/arch/arm/enter_user_mode.S \
-               kernel/arch/arm/exceptions.S
+               kernel/arch/arm/exceptions.S kernel/arch/arm/context_switch.S
 RISCV_BOOT_SRC = kernel/arch/riscv/boot_riscv.S kernel/arch/riscv/enter_user_mode.S
 X86_SYSCALL_SRC = kernel/arch/x86/syscall.S
 ARM_SYSCALL_SRC = kernel/arch/arm/syscall.S

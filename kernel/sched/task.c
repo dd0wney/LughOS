@@ -58,7 +58,9 @@ void task_init(void) {
     kt->state            = TASK_RUNNING;
     kt->deadline         = 0u;
     kt->kernel_stack_top = assign_kernel_stack(0u);
-    kt->_padding1        = 0u;
+    /* kernel_task is already running on the boot SVC stack; it has no
+     * saved context until something switches *away* from it. */
+    kt->saved_sp         = 0u;
     task_count = 1u;
     current_task = kt;
     log_message(LOG_INFO,
@@ -136,7 +138,11 @@ int create_task(task_t* spec) {
     t->state            = TASK_READY;
     t->deadline         = spec->deadline;
     t->kernel_stack_top = assign_kernel_stack(slot);
-    t->_padding1        = 0u;
+    /* saved_sp = kernel_stack_top means "stack is empty; on first
+     * switch-in, load this as the starting SP and call the entry
+     * point". Real preemption (A4) sets saved_sp to wherever the
+     * callee-saved frame ended up on the stack. */
+    t->saved_sp         = t->kernel_stack_top;
 
     if (t->kernel_stack_top == 0u) {
         log_message(LOG_WARNING,

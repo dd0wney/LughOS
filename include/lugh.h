@@ -80,8 +80,17 @@ typedef struct {
     uint64_t state;            /* TASK_READY, TASK_RUNNING, TASK_BLOCKED, TASK_TERMINATED */
     uint64_t deadline;         /* For future real-time scheduling */
     uint32_t kernel_stack_top; /* per-task kernel stack TOP (grows down); 0 = no stack */
-    uint32_t _padding1;        /* explicit padding to keep total a multiple of 8 */
+    uint32_t saved_sp;         /* SP when task is descheduled (Phase 3 A4); 0 = never run */
 } task_t;
+
+/* Context switch — arch-specific assembly. Saves callee-saved regs of prev
+ * onto prev's kernel stack, writes the resulting SP into prev->saved_sp,
+ * loads next->saved_sp into SP, restores next's regs, returns to the
+ * instruction after arm_context_switch was originally called (now in
+ * next's context). Caller must mask IRQs around the call. The current_task
+ * swap happens inside the switch — see kernel/arch/<arch>/context_switch.S */
+void arm_context_switch(task_t* prev, task_t* next);
+void x86_context_switch(task_t* prev, task_t* next);
 
 /* Message priorities */
 typedef enum {
