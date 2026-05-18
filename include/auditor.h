@@ -34,7 +34,14 @@
  *   DENY:        priority=attempted, src_domain, protocol, channel_id,
  *                operation=attempted OP_*, checksum=[reason:8][dst_domain:8][dst_channel:8][rsvd:8],
  *                payload_hash[0..3]=granted_caps, [4..7]=required_caps,
- *                [8..11]=dst_channel_id (0xFFFFFFFF if none), [12..15]=zeros
+ *                [8..11]=dst_channel_id (0xFFFFFFFF if none),
+ *                [12..14]=parent_task_id (24-bit; sentinel 0xFFFFFF = ROOT/none) (J5),
+ *                [15]=[depth:4 | sibling_count:4] (J6).
+ *                Phase 3 J5 ate the first three bytes of the previously-zero
+ *                [12..15] slot for parent_task_id; J6 reserves the final
+ *                byte for the lineage depth + sibling count packed nibbles.
+ *                MAX_TASKS=1024 fits in 24 bits with room to spare;
+ *                depth/sibling_count are saturating-capped at 15.
  *   TASK_CREATE: priority=task.priority (clamped to uint8), src_domain=task.domain (low 8),
  *                protocol=0, channel_id=0,
  *                operation=task.task_id, checksum=task.parent_task_id,
@@ -95,7 +102,16 @@ typedef struct __attribute__((packed)) {
     uint8_t  payload_hash[16];/* 4×FNV-1a-32 (MSG) or cap diag (DENY)*/
 } auditor_record_t;           /* sizeof = 44 bytes, fixed              */
 
-/* Context passed to auditor_deny() — assembled by ipc.c from channel table. */
+/* Context passed to auditor_deny() — assembled by ipc.c from channel table.
+ *
+ * parent_task_id (J5) carries the caller's lineage at deny time so the
+ * JEPA encoder can correlate denials with the task that spawned the
+ * offender. Pass TASK_PARENT_NONE if current_task is NULL (eg auditor
+ * tests calling the path before task_init).
+ *
+ * lineage_depth + sibling_count (J6) are computed by the emit site
+ * before calling auditor_deny — bounded saturating walk of tasks[].
+ * Each is clamped to 4 bits (max 15). */
 typedef struct {
     uint8_t  src_domain;
     uint8_t  dst_domain;      /* 0xFF if no destination channel */
@@ -108,6 +124,10 @@ typedef struct {
     uint32_t operation;
     uint32_t granted_caps;
     uint32_t required_caps;
+    uint32_t parent_task_id;  /* TASK_PARENT_NONE if no parent (root or no current_task) */
+    uint8_t  lineage_depth;   /* J6: 0..15, saturating; 0 = root */
+    uint8_t  sibling_count;   /* J6: 0..15, saturating; tasks sharing parent_task_id */
+    uint8_t  _pad2[2];
 } auditor_deny_info_t;
 
 /* Exported globals — defined in services/auditor/exporter.c */

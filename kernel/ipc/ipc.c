@@ -30,17 +30,23 @@ static void emit_create_deny(uint32_t requested_caps, uint32_t target_domain,
     if (!auditor_enabled || current_task == NULL)
         return;
     auditor_deny_info_t d;
-    d.src_domain    = (uint8_t)(current_task->domain & 0xFFu);
-    d.dst_domain    = (uint8_t)(target_domain & 0xFFu);
-    d.src_channel   = 0xFFu;
-    d.dst_channel   = 0xFFu;
-    d.protocol      = (uint8_t)((uint32_t)protocol & 0xFFu);
-    d.reason        = reason;
-    d.priority      = 0;
-    d._pad          = 0;
-    d.operation     = 0u;
-    d.granted_caps  = current_task->cap_mask;
-    d.required_caps = requested_caps;
+    d.src_domain     = (uint8_t)(current_task->domain & 0xFFu);
+    d.dst_domain     = (uint8_t)(target_domain & 0xFFu);
+    d.src_channel    = 0xFFu;
+    d.dst_channel    = 0xFFu;
+    d.protocol       = (uint8_t)((uint32_t)protocol & 0xFFu);
+    d.reason         = reason;
+    d.priority       = 0;
+    d._pad           = 0;
+    d.operation      = 0u;
+    d.granted_caps   = current_task->cap_mask;
+    d.required_caps  = requested_caps;
+    /* J5: caller's lineage at deny time. J6 will populate depth/siblings. */
+    d.parent_task_id = current_task->parent_task_id;
+    d.lineage_depth  = 0u;
+    d.sibling_count  = 0u;
+    d._pad2[0]       = 0u;
+    d._pad2[1]       = 0u;
     auditor_deny(&d);
 }
 
@@ -49,21 +55,32 @@ static void emit_deny(int src_id, int dst_id,
     if (!auditor_enabled)
         return;
     auditor_deny_info_t d;
-    d.src_domain   = (uint8_t)(channels[src_id].domain & 0xFFu);
-    d.dst_domain   = (dst_id >= 0 && dst_id < MAX_IPC_CHANNELS)
+    d.src_domain    = (uint8_t)(channels[src_id].domain & 0xFFu);
+    d.dst_domain    = (dst_id >= 0 && dst_id < MAX_IPC_CHANNELS)
                          ? (uint8_t)(channels[dst_id].domain & 0xFFu)
                          : 0xFFu;
-    d.src_channel  = (uint8_t)((uint32_t)src_id & 0xFFu);
-    d.dst_channel  = (dst_id >= 0 && dst_id < MAX_IPC_CHANNELS)
+    d.src_channel   = (uint8_t)((uint32_t)src_id & 0xFFu);
+    d.dst_channel   = (dst_id >= 0 && dst_id < MAX_IPC_CHANNELS)
                          ? (uint8_t)((uint32_t)dst_id & 0xFFu)
                          : 0xFFu;
-    d.protocol     = (uint8_t)((uint32_t)channels[src_id].socket.protocol & 0xFFu);
-    d.reason       = reason;
-    d.priority     = priority;
-    d._pad         = 0;
-    d.operation    = op;
-    d.granted_caps = channels[src_id].cap_mask;
+    d.protocol      = (uint8_t)((uint32_t)channels[src_id].socket.protocol & 0xFFu);
+    d.reason        = reason;
+    d.priority      = priority;
+    d._pad          = 0;
+    d.operation     = op;
+    d.granted_caps  = channels[src_id].cap_mask;
     d.required_caps = required_caps_for_op(op);
+    /* J5: caller's lineage at deny time. current_task may be NULL during
+     * pre-task_init self-tests; surface TASK_PARENT_NONE in that case so
+     * the encoder can distinguish "no caller" from a real kernel-rooted
+     * task. */
+    d.parent_task_id = (current_task != NULL)
+                       ? current_task->parent_task_id
+                       : TASK_PARENT_NONE;
+    d.lineage_depth  = 0u;
+    d.sibling_count  = 0u;
+    d._pad2[0]       = 0u;
+    d._pad2[1]       = 0u;
     auditor_deny(&d);
 }
 

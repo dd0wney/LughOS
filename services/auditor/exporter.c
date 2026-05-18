@@ -377,22 +377,40 @@ void auditor_deny(const auditor_deny_info_t *info) {
                  | ((uint32_t)info->dst_domain   << 8)
                  | ((uint32_t)info->dst_channel  << 16);
 
-    /* payload_hash carries capability diagnostics:
-     * [0..3] granted_caps  [4..7] required_caps
-     * [8..11] dst_channel as full uint32  [12..15] zeros */
+    /* payload_hash carries capability diagnostics + lineage (J5/J6):
+     * [0..3]   granted_caps
+     * [4..7]   required_caps
+     * [8..11]  dst_channel as full uint32 (0xFFFFFFFF = none)
+     * [12..14] parent_task_id (24-bit; 0xFFFFFF = TASK_PARENT_NONE)
+     * [15]     [depth:4][sibling_count:4]   (J6; populated by emit sites)
+     *
+     * MAX_TASKS=1024 << 2^24 so 24 bits is comfortably future-proof
+     * for parent_task_id. The all-ones sentinel 0xFFFFFF compresses
+     * TASK_PARENT_NONE (which is 0xFFFFFFFF) — the decoder lifts it
+     * back to the full sentinel for display. */
     uint32_t i;
-    uint32_t vals[4];
+    uint32_t vals[3];
     vals[0] = info->granted_caps;
     vals[1] = info->required_caps;
     vals[2] = (info->dst_channel == 0xFFu) ? 0xFFFFFFFFu
                                             : (uint32_t)info->dst_channel;
-    vals[3] = 0u;
-    for (i = 0; i < 4u; i++) {
+    for (i = 0; i < 3u; i++) {
         rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
         rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
         rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
         rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
     }
+    /* Compress parent_task_id into 24 bits. TASK_PARENT_NONE (0xFFFFFFFF)
+     * lands as 0xFFFFFF — still all-ones in the truncated domain. */
+    uint32_t parent24 = info->parent_task_id & 0x00FFFFFFu;
+    rec.payload_hash[12] = (uint8_t)(parent24);
+    rec.payload_hash[13] = (uint8_t)(parent24 >> 8);
+    rec.payload_hash[14] = (uint8_t)(parent24 >> 16);
+    /* J6 nibbles: [depth:4][sibling_count:4]. Saturating-capped at 15
+     * by emit-site invariant; we don't re-clamp here. */
+    uint8_t depth  = info->lineage_depth & 0x0Fu;
+    uint8_t sibs   = info->sibling_count & 0x0Fu;
+    rec.payload_hash[15] = (uint8_t)((depth << 4) | sibs);
     tlm_write_bytes(&rec, sizeof(rec));
 }
 

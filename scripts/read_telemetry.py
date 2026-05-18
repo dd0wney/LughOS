@@ -23,7 +23,13 @@ Record schema (44 bytes packed, '<IHHQBBBBII16s'):
 For DENY records (type=3), checksum encodes:
   [reason:8][dst_domain:8][dst_channel:8][reserved:8]
   and payload_hash encodes:
-  [granted_caps:32][required_caps:32][dst_channel_id:32][zeros:32]
+  [granted_caps:32][required_caps:32][dst_channel_id:32]
+  [parent_task_id:24 (J5)][depth:4 | sibling_count:4 (J6)]
+
+The parent_task_id field is the caller's task_t.parent_task_id at deny
+time. 0xFFFFFF is the truncated form of TASK_PARENT_NONE (the kernel
+root, or "no current_task" in early-boot self-tests). depth and
+sibling_count are saturating-capped at 15.
 
 For CHAN_CREATE records (type=5, v2+), the layout is:
   operation     = cap_mask
@@ -214,6 +220,17 @@ def format_record(r: dict) -> str:
         required = _unpack_le32(raw_hash, 4)
         dst_ch32 = _unpack_le32(raw_hash, 8)
 
+        # J5: 24-bit parent_task_id packed at [12..14], byte 15 reserved
+        # for J6's depth+siblings nibbles. Lift the all-ones truncation
+        # back to the full TASK_PARENT_NONE sentinel for display.
+        parent24    = raw_hash[12] | (raw_hash[13] << 8) | (raw_hash[14] << 16)
+        parent_id   = TASK_PARENT_NONE if parent24 == 0xFFFFFF else parent24
+        parent_str  = "ROOT" if parent_id == TASK_PARENT_NONE else str(parent_id)
+        # J6: nibbles in byte 15 — depth in high nibble, sibs in low.
+        depth_byte    = raw_hash[15]
+        lineage_depth = (depth_byte >> 4) & 0x0F
+        sibling_count = depth_byte & 0x0F
+
         reason_name = DENY_REASON.get(reason_code, f"UNKNOWN({reason_code})")
         dst_str = "none" if dst_ch32 == 0xFFFFFFFF else str(dst_ch32)
 
@@ -224,7 +241,8 @@ def format_record(r: dict) -> str:
             f"op=0x{r['operation']:08X}  "
             f"granted=[{caps_str(granted)}]  "
             f"required=[{caps_str(required)}]  "
-            f"dst=ch{dst_str}(dom={dst_domain})"
+            f"dst=ch{dst_str}(dom={dst_domain})  "
+            f"parent={parent_str}  depth={lineage_depth} sibs={sibling_count}"
         )
 
     return f"[j={j:>7}]  UNKNOWN   type={r['type']}"
