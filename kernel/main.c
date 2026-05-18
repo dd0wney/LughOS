@@ -714,7 +714,10 @@ void kmain(void) {
     if (create_task(&user_init_task) != 0) {
         log_message(LOG_ERROR, "Failed to create user_init_task\n");
     } else {
-        current_task = &user_init_task;
+        /* current_task must point at the table-resident copy so the
+         * scheduler and IPC paths see identical state (Phase 3 A1). */
+        task_t* live = task_find(user_init_task.task_id);
+        current_task = (live != NULL) ? live : &user_init_task;
         user_bootstrap_channel = ipc_create_channel(0u, 0u, CAP_IPC_SEND,
                                                     NNG_PROTO_PUB0);
         if (user_bootstrap_channel < 0) {

@@ -154,6 +154,14 @@ uint64_t generate_secure_id(void);
 void task_init(void);
 int  create_task(task_t* spec);
 extern task_t* current_task;
+
+/* Accessors that let the scheduler operate on the kernel task table
+ * (Phase 3 A1 — the kernel table is the single source of truth; the
+ * scheduler no longer maintains a parallel rr_tasks[] copy).
+ * task_find returns NULL when id is not present. */
+task_t* task_table(void);
+int     task_table_count(void);
+task_t* task_find(uint32_t task_id);
 void process_events(void);
 void cpu_idle(void);
 void enter_user_mode(uint32_t user_eip, uint32_t user_esp) __attribute__((noreturn));

@@ -2,13 +2,15 @@
 #include "capabilities.h"
 
 /* Static task table per NASA Power of Ten rule 5 (no dynamic allocation
- * after init) and rule 2 (statically determinable upper bound). */
+ * after init) and rule 2 (statically determinable upper bound). The
+ * kernel task lives in slot 0 — Phase 3 A1 made this the single source
+ * of truth so the scheduler doesn't maintain a parallel copy. */
 static task_t tasks[MAX_TASKS];
 static uint32_t task_count = 0;
 
-/* Root-of-trust identity. Set by task_init() before init_ipc() so every
- * channel created during boot has a non-NULL owner. */
-static task_t kernel_task;
+/* current_task points into tasks[] above (NOT a free-standing static).
+ * Same address as the scheduler walks, so context switches and cap
+ * checks operate on identical state. */
 task_t* current_task = NULL;
 
 /* Monotonic task-id allocator. Task id 0 is reserved as "no task".
@@ -22,18 +24,42 @@ static uint32_t allocate_task_id(void) {
 }
 
 void task_init(void) {
-    /* Boot the root task: CAP_ALL in domain 0. Bootstrap IPC (auditor,
-     * scheduler channels) runs under this identity. */
-    kernel_task.task_id  = allocate_task_id();
-    kernel_task.priority = 0;
-    kernel_task.cap_mask = CAP_ALL;
-    kernel_task.domain   = 0u;
-    kernel_task.state    = TASK_RUNNING;
-    kernel_task.deadline = 0u;
-    current_task = &kernel_task;
+    /* Boot the root task into tasks[0] with CAP_ALL in domain 0.
+     * Everything subsequent (auditor, scheduler channels, user_init_task)
+     * is created under this identity. The scheduler iterates tasks[]
+     * including this slot, but kernel_task's state stays RUNNING so
+     * the round-robin walker doesn't accidentally schedule it. */
+    task_t* kt = &tasks[0];
+    kt->task_id  = allocate_task_id();
+    kt->priority = 0;
+    kt->cap_mask = CAP_ALL;
+    kt->domain   = 0u;
+    kt->state    = TASK_RUNNING;
+    kt->deadline = 0u;
+    task_count = 1u;
+    current_task = kt;
     log_message(LOG_INFO,
         "Task subsystem: kernel_task ready (id=%u, caps=0x%X, domain=%u)\n",
-        kernel_task.task_id, kernel_task.cap_mask, kernel_task.domain);
+        kt->task_id, kt->cap_mask, kt->domain);
+}
+
+/* ── Public accessors for the unified task table ──────────────────
+ * The scheduler operates on this table directly (Phase 3 A1). */
+
+task_t* task_table(void) {
+    return tasks;
+}
+
+int task_table_count(void) {
+    return (int)task_count;
+}
+
+task_t* task_find(uint32_t id) {
+    if (id == 0u) return NULL;        /* 0 is reserved "no task" */
+    for (uint32_t i = 0; i < task_count; i++) {
+        if (tasks[i].task_id == id) return &tasks[i];
+    }
+    return NULL;
 }
 
 /* create_task: install a new task into the table.

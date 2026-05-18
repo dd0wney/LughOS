@@ -1,47 +1,42 @@
 #include "lugh.h"
 
-/* Fixed-size task table per NASA Power of Ten rule 3.
- * Smaller than MAX_TASKS (1024) — the scheduler only needs to track
- * runnable tasks, not every possible task ID in the system. */
+/* Round-robin scheduler. Phase 3 A1: this used to maintain a private
+ * `rr_tasks[RR_MAX_TASKS]` copy of the task data; that table was
+ * disconnected from `kernel/sched/task.c`'s authoritative `tasks[]`,
+ * which meant state changes by `create_task()` were invisible to the
+ * scheduler and vice versa. Now we operate directly on the kernel
+ * table via `task_table()` / `task_table_count()`. The only state
+ * the scheduler still owns is the round-robin cursor. */
+
+/* Upper bound check; not a storage backing. */
 #define RR_MAX_TASKS 64
 
-static task_t rr_tasks[RR_MAX_TASKS];
-static int    rr_task_count = 0;
-static int    rr_cursor     = 0;   /* index of the last scheduled slot */
+static int rr_cursor = 0;       /* index into task_table() of the last scheduled slot */
 
 /* ── Internal helpers ─────────────────────────────────────────── */
 
 static int rr_init(void *context) {
     (void)context;
-    int i;
-    for (i = 0; i < RR_MAX_TASKS; i++) {
-        rr_tasks[i].task_id  = 0;
-        rr_tasks[i].priority = 0;
-        rr_tasks[i].cap_mask = 0;
-        rr_tasks[i].domain   = 0;
-        rr_tasks[i].state    = TASK_TERMINATED;
-        rr_tasks[i].deadline = 0;
-    }
-    rr_task_count = 0;
-    rr_cursor     = 0;
-    log_message(LOG_INFO, "Scheduler: round-robin initialised (capacity=%d)\n",
-                RR_MAX_TASKS);
+    rr_cursor = 0;
+    log_message(LOG_INFO,
+        "Scheduler: round-robin initialised (operates on kernel task table, max=%d)\n",
+        RR_MAX_TASKS);
     return 0;
 }
 
-/* Advance to the next READY task in round-robin order.
- * If tasks/num_tasks are non-NULL the caller's array is used; otherwise
- * the internal table is used.  The previously RUNNING task is set back
- * to READY so it re-enters the rotation next tick. */
+/* Advance to the next READY task in round-robin order. If tasks/num_tasks
+ * are non-NULL the caller's array is used (legacy callers); otherwise the
+ * kernel task table is used. The previously RUNNING task is set back to
+ * READY so it re-enters the rotation next tick. */
 static int rr_schedule(task_t *tasks, int num_tasks, uint32_t *next_task_id) {
     if (!next_task_id) return -1;
 
-    task_t *t = (tasks && num_tasks > 0) ? tasks : rr_tasks;
-    int     n = (tasks && num_tasks > 0) ? num_tasks : rr_task_count;
+    task_t *t = (tasks && num_tasks > 0) ? tasks : task_table();
+    int     n = (tasks && num_tasks > 0) ? num_tasks : task_table_count();
 
     if (n <= 0) return -1;
 
-    /* Yield: mark the current RUNNING task back to READY */
+    /* Yield: mark any RUNNING tasks back to READY */
     int i;
     for (i = 0; i < n; i++) {
         if (t[i].state == (uint64_t)TASK_RUNNING)
@@ -62,99 +57,62 @@ static int rr_schedule(task_t *tasks, int num_tasks, uint32_t *next_task_id) {
     return -1;  /* no READY tasks */
 }
 
+/* The task is already in the kernel table (placed there by create_task);
+ * the scheduler's only job here is to log and apply any policy decision
+ * about whether the task should run. For now we accept everything that
+ * fits within the RR_MAX_TASKS budget. */
 static int rr_add_task(task_t *task) {
     if (!task) return -1;
-    if (rr_task_count >= RR_MAX_TASKS) {
-        log_message(LOG_ERROR, "Scheduler: task table full (%d)\n", RR_MAX_TASKS);
+    if (task_table_count() > RR_MAX_TASKS) {
+        log_message(LOG_ERROR, "Scheduler: task table over budget (%d > %d)\n",
+                    task_table_count(), RR_MAX_TASKS);
         return -1;
     }
-    /* Reject duplicate task_id */
-    int i;
-    for (i = 0; i < rr_task_count; i++) {
-        if (rr_tasks[i].task_id == task->task_id) {
-            log_message(LOG_WARNING, "Scheduler: task %u already registered\n",
-                        task->task_id);
-            return -1;
-        }
-    }
-    rr_tasks[rr_task_count++] = *task;
     log_message(LOG_DEBUG, "Scheduler: added task %u (priority=%d)\n",
                 task->task_id, task->priority);
     return 0;
 }
 
+/* Mark the task TERMINATED in the kernel table. The slot stays occupied
+ * (kernel table is append-only by current design) but the scheduler
+ * walker will skip it because TERMINATED != READY. */
 static int rr_remove_task(uint32_t task_id) {
-    int i;
-    for (i = 0; i < rr_task_count; i++) {
-        if (rr_tasks[i].task_id == task_id) {
-            int last = --rr_task_count;
-            rr_tasks[i] = rr_tasks[last];
-            rr_tasks[last].state = TASK_TERMINATED;
-            /* Keep cursor in bounds after compaction */
-            if (rr_task_count > 0 && rr_cursor >= rr_task_count)
-                rr_cursor = rr_task_count - 1;
-            log_message(LOG_DEBUG, "Scheduler: removed task %u\n", task_id);
-            return 0;
-        }
+    task_t *t = task_find(task_id);
+    if (!t) {
+        log_message(LOG_WARNING, "Scheduler: task %u not found\n", task_id);
+        return -1;
     }
-    log_message(LOG_WARNING, "Scheduler: task %u not found\n", task_id);
-    return -1;
+    t->state = TASK_TERMINATED;
+    /* Keep cursor in bounds if removal shrunk the schedulable set */
+    int n = task_table_count();
+    if (n > 0 && rr_cursor >= n) rr_cursor = n - 1;
+    log_message(LOG_DEBUG, "Scheduler: removed task %u\n", task_id);
+    return 0;
 }
 
-/* Serialise internal state into buf for hot-swap handoff.
- * Layout: [count:4][cursor:4][task_0..task_n] */
+/* Serialise scheduler state for hot-swap handoff. The kernel task
+ * table is owned by task.c and isn't dumped here — Phase 3 A1
+ * narrowed `get_state` to just the round-robin cursor. */
 static int rr_get_state(void *buf, size_t *size) {
     if (!buf || !size) return -1;
-    size_t needed = sizeof(int) * 2 + (size_t)rr_task_count * sizeof(task_t);
+    size_t needed = sizeof(int);
     if (*size < needed) { *size = needed; return -1; }
-
     uint8_t *p = (uint8_t *)buf;
     int i;
-
-    /* write count */
-    for (i = 0; i < (int)sizeof(int); i++)
-        p[i] = ((uint8_t *)&rr_task_count)[i];
-    p += sizeof(int);
-
-    /* write cursor */
     for (i = 0; i < (int)sizeof(int); i++)
         p[i] = ((uint8_t *)&rr_cursor)[i];
-    p += sizeof(int);
-
-    /* write tasks */
-    int j;
-    for (j = 0; j < rr_task_count; j++) {
-        for (i = 0; i < (int)sizeof(task_t); i++)
-            p[i] = ((uint8_t *)&rr_tasks[j])[i];
-        p += sizeof(task_t);
-    }
     *size = needed;
     return 0;
 }
 
 static int rr_set_state(void *buf, size_t size) {
-    if (!buf || size < sizeof(int) * 2) return -1;
-
+    if (!buf || size < sizeof(int)) return -1;
     uint8_t *p = (uint8_t *)buf;
+    int cursor;
     int i;
-
-    int count, cursor;
-    for (i = 0; i < (int)sizeof(int); i++) ((uint8_t *)&count)[i]  = p[i];
-    p += sizeof(int);
-    for (i = 0; i < (int)sizeof(int); i++) ((uint8_t *)&cursor)[i] = p[i];
-    p += sizeof(int);
-
-    if (count < 0 || count > RR_MAX_TASKS) return -1;
-    if (size < sizeof(int) * 2 + (size_t)count * sizeof(task_t)) return -1;
-
-    rr_task_count = count;
-    rr_cursor     = cursor;
-    int j;
-    for (j = 0; j < count; j++) {
-        for (i = 0; i < (int)sizeof(task_t); i++)
-            ((uint8_t *)&rr_tasks[j])[i] = p[i];
-        p += sizeof(task_t);
-    }
+    for (i = 0; i < (int)sizeof(int); i++)
+        ((uint8_t *)&cursor)[i] = p[i];
+    rr_cursor = cursor;
     return 0;
 }
 
