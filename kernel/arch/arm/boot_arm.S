@@ -89,7 +89,7 @@ _start:
 _vectors_start:
     ldr pc, [pc, #24]            @ 0x00 reset           -> _reset_loop
     ldr pc, [pc, #24]            @ 0x04 undef inst      -> arm_undef_panic
-    ldr pc, [pc, #24]            @ 0x08 SVC / SWI       -> arm_svc_panic (TODO: real)
+    ldr pc, [pc, #24]            @ 0x08 SVC / SWI       -> syscall_entry
     ldr pc, [pc, #24]            @ 0x0C prefetch abort  -> arm_pabort_panic
     ldr pc, [pc, #24]            @ 0x10 data abort      -> arm_dabort_panic
     ldr pc, [pc, #24]            @ 0x14 reserved        -> arm_reserved_panic
@@ -98,7 +98,7 @@ _vectors_start:
     @ Literal pool: absolute handler addresses (resolved at link time).
     .word _reset_loop
     .word arm_undef_panic
-    .word arm_svc_panic
+    .word syscall_entry
     .word arm_pabort_panic
     .word arm_dabort_panic
     .word arm_reserved_panic
