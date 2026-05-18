@@ -118,6 +118,15 @@ typedef void (*task_entry_fn)(void);
 void task_setup_initial_frame(task_t* t, task_entry_fn entry);
 void task_yield(void);
 
+/* Phase 4 F1: emit a synthetic TASK_CREATE auditor record for the
+ * kernel root task. task_init() initialises kernel_task BEFORE
+ * auditor_init() runs (auditor_enabled is 0 at that point), so the
+ * "every task creation produces a TASK_CREATE event" invariant J1
+ * established doesn't hold for the root. Call this after auditor_init
+ * to backfill the event so the JEPA-side graph replay
+ * (scripts/reconstruct_graph.py) sees a self-contained stream. */
+void task_emit_kernel_create_event(void);
+
 /* Message priorities */
 typedef enum {
     PRIORITY_HIGH = 0, /* Critical commands, interrupts, grid alerts */

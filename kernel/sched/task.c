@@ -242,3 +242,22 @@ void task_yield(void) {
 #endif
     splx(old);
 }
+
+/* Phase 4 F1: backfill the kernel_task creation event.
+ *
+ * task_init() runs before auditor_init(), so the auditor_task_create
+ * call J1 placed at the end of create_task() never fires for the
+ * root task — task_init() doesn't even go through create_task(). The
+ * audit stream therefore had no record for task_id=1, even though
+ * every other task references it as parent_task_id=1.
+ *
+ * J9's reconstruct_graph.py documented this as a known limitation.
+ * The clean fix: main.c calls this right after auditor_init() (and
+ * before anything else that might emit a record), so the synthetic
+ * TASK_CREATE for kernel_task is the first record in the stream. */
+void task_emit_kernel_create_event(void) {
+    if (task_count == 0u || current_task == NULL) return;
+    task_t *kt = &tasks[0];
+    auditor_task_create(kt->task_id, kt->parent_task_id, kt->cap_mask,
+                        kt->domain, kt->priority, kt->kernel_stack_top);
+}

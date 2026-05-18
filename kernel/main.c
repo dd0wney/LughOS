@@ -1218,6 +1218,12 @@ void kmain(void) {
     init_ipc();
     auditor_init();
 
+    /* Phase 4 F1: backfill the kernel_task TASK_CREATE event the
+     * auditor missed because task_init runs before auditor_init.
+     * Without this, the audit stream has no record for task_id=1
+     * even though every other task references it as parent. */
+    task_emit_kernel_create_event();
+
     // Initialize scheduler
     rr_scheduler.init(NULL);
 
