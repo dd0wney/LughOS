@@ -7,6 +7,7 @@
 #include "crypto.h"
 #include "auditor.h"
 #include "capabilities.h"
+#include "domain_graph.h"
 #include "transactions.h"
 #include "update.h"
 #include "sandbox.h"
@@ -350,8 +351,104 @@ void test_ipc_enforcement(void) {
         ipc_close_channel(ch_b);
     }
 
+    /* ── Subtest 4: same-domain ipc_connect succeeds — emits CHAN_CONNECT.
+     * Doesn't disturb the deny-path assertions above; runs only after them
+     * so a failure here can't mask an earlier deny failure. */
+    {
+        int ch_a = ipc_create_channel(0, 0, CAP_IPC_SEND | CAP_IPC_RECV,
+                                      NNG_PROTO_PUSH0);
+        int ch_b = ipc_create_channel(0, 0, CAP_IPC_SEND | CAP_IPC_RECV,
+                                      NNG_PROTO_PULL0);
+        if (ch_a < 0 || ch_b < 0) {
+            log_message(LOG_ERROR, "Enforcement test 4: create failed\n");
+            goto done;
+        }
+        int rv = ipc_connect(ch_a, ch_b);
+        if (rv == 0) {
+            log_message(LOG_INFO,
+                "Enforcement test 4 PASS: same-domain connect allowed "
+                "(CHAN_CONNECT record emitted)\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Enforcement test 4 FAIL: expected 0, got %d\n", rv);
+        }
+        auditor_tick();
+        ipc_close_channel(ch_a);
+        ipc_close_channel(ch_b);
+    }
+
+    /* ── Subtest 5: domain_edge_set(0, 1) emits AUDITOR_REC_DOMAIN_EDGE
+     * and returns 0. The record is the audit trail for the policy change. */
+    {
+        int rv = domain_edge_set(0u, 1u);
+        if (rv == 0) {
+            log_message(LOG_INFO,
+                "Enforcement test 5 PASS: domain edge 0->1 added "
+                "(DOMAIN_EDGE record emitted)\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Enforcement test 5 FAIL: expected 0, got %d\n", rv);
+        }
+        auditor_tick();
+    }
+
+    /* ── Subtest 6: with edge 0->1 present, cross-domain ipc_connect
+     * 0->1 now succeeds via the matrix (no CAP_CROSS_DOMAIN needed). */
+    {
+        int ch_a = ipc_create_channel(0, 0, CAP_IPC_SEND | CAP_IPC_RECV,
+                                      NNG_PROTO_PUSH0);
+        int ch_b = ipc_create_channel(0, 1, CAP_IPC_SEND | CAP_IPC_RECV,
+                                      NNG_PROTO_PULL0);
+        if (ch_a < 0 || ch_b < 0) {
+            log_message(LOG_ERROR, "Enforcement test 6: create failed (a=%d b=%d)\n",
+                        ch_a, ch_b);
+            goto done;
+        }
+        int rv = ipc_connect(ch_a, ch_b);
+        if (rv == 0) {
+            log_message(LOG_INFO,
+                "Enforcement test 6 PASS: cross-domain connect allowed via matrix\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Enforcement test 6 FAIL: expected 0, got %d\n", rv);
+        }
+        auditor_tick();
+        ipc_close_channel(ch_a);
+        ipc_close_channel(ch_b);
+    }
+
+    /* ── Subtest 7: CAP_CROSS_DOMAIN bypass — a channel holding the
+     * capability may connect to a non-allowed domain (no edge 0->2). */
+    {
+        int ch_a = ipc_create_channel(0, 0,
+                                      CAP_IPC_SEND | CAP_IPC_RECV | CAP_CROSS_DOMAIN,
+                                      NNG_PROTO_PUSH0);
+        int ch_b = ipc_create_channel(0, 2, CAP_IPC_SEND | CAP_IPC_RECV,
+                                      NNG_PROTO_PULL0);
+        if (ch_a < 0 || ch_b < 0) {
+            log_message(LOG_ERROR,
+                "Enforcement test 7: create failed (a=%d b=%d)\n", ch_a, ch_b);
+            goto done;
+        }
+        int rv = ipc_connect(ch_a, ch_b);
+        if (rv == 0) {
+            log_message(LOG_INFO,
+                "Enforcement test 7 PASS: CAP_CROSS_DOMAIN bypass to dom=2\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Enforcement test 7 FAIL: expected 0, got %d\n", rv);
+        }
+        auditor_tick();
+        ipc_close_channel(ch_a);
+        ipc_close_channel(ch_b);
+    }
+
 done:
-    log_message(LOG_INFO, "IPC enforcement tests: %d/3 passed\n", pass);
+    log_message(LOG_INFO, "IPC enforcement tests: %d/7 passed\n", pass);
 }
 
 /* Test task-bound capabilities: a child task cannot escalate beyond its
@@ -830,6 +927,12 @@ void kmain(void) {
     // current_task->cap_mask, so it must point to a real task by this point.
     task_init();
 
+    // Initialise the domain transition matrix BEFORE init_ipc() so any
+    // cross-domain check inside IPC has a populated matrix to consult.
+    // Default state is identity (each domain reaches only itself) — explicit
+    // edges must be added via domain_edge_set() before domain_edges_seal().
+    domain_edges_init();
+
     // Initialize IPC subsystem (includes NNG init) and arm auditor ring
     init_ipc();
     auditor_init();
@@ -848,7 +951,11 @@ void kmain(void) {
 
     // Test the update system
     test_update_system();
-    
+
+    // All policy mutations are done — seal the domain matrix so a
+    // compromised user task cannot widen cross-domain reachability.
+    domain_edges_seal();
+
     // Initialize user mode subsystem
     log_message(LOG_INFO, "Initializing user mode subsystem\n");
 

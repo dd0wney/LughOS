@@ -150,6 +150,151 @@ static void emit_heartbeat_record(void) {
     tlm_write_bytes(&rec, sizeof(rec));
 }
 
+/* ── Structural event emission (sync — no ring) ──────────────────── */
+
+/* CHAN_CREATE packs identity + policy into the existing 44-byte layout.
+ * Field reuse mapping (mirrors auditor.h comment):
+ *   priority      = 0
+ *   src_domain    = low 8 bits of domain  (for fast filtering)
+ *   protocol      = NNG protocol id
+ *   channel_id    = channel table index
+ *   operation     = cap_mask  (which CAP_* bits the channel holds)
+ *   checksum      = owner_task_id  (root-of-trust binding)
+ *   payload_hash  = [domain:32][security_level:32][zeros:64]
+ *                   (full 32-bit domain lets us handle >255 domains later
+ *                    without another version bump.)
+ */
+static void emit_chan_create_record(uint32_t channel_id,
+                                    uint32_t owner_task_id,
+                                    uint32_t cap_mask,
+                                    uint32_t domain,
+                                    uint32_t security_level,
+                                    uint32_t protocol) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_CHAN_CREATE);
+    rec.priority   = 0;
+    rec.src_domain = (uint8_t)(domain & 0xFFu);
+    rec.protocol   = (uint8_t)(protocol & 0xFFu);
+    rec.channel_id = (uint8_t)(channel_id & 0xFFu);
+    rec.operation  = cap_mask;
+    rec.checksum   = owner_task_id;
+
+    uint32_t vals[4];
+    vals[0] = domain;
+    vals[1] = security_level;
+    vals[2] = 0u;
+    vals[3] = 0u;
+    uint32_t i;
+    for (i = 0; i < 4u; i++) {
+        rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
+        rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
+        rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
+        rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
+    }
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_chan_create(uint32_t channel_id,
+                         uint32_t owner_task_id,
+                         uint32_t cap_mask,
+                         uint32_t domain,
+                         uint32_t security_level,
+                         uint32_t protocol) {
+    if (!auditor_enabled)
+        return;
+    emit_chan_create_record(channel_id, owner_task_id, cap_mask,
+                            domain, security_level, protocol);
+}
+
+/* CHAN_CONNECT: success-branch edge event. Packing (mirrors auditor.h):
+ *   operation     = dst_channel_id  (full uint32 so future MAX_IPC_CHANNELS
+ *                                    growth past 256 doesn't lose the dst)
+ *   checksum      = dst_domain      (full uint32)
+ *   payload_hash  = [src_cap_mask:32][dst_cap_mask:32][zeros:64]
+ */
+static void emit_chan_connect_record(uint32_t src_channel_id,
+                                     uint32_t src_domain,
+                                     uint32_t src_cap_mask,
+                                     uint32_t src_protocol,
+                                     uint32_t dst_channel_id,
+                                     uint32_t dst_domain,
+                                     uint32_t dst_cap_mask) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_CHAN_CONNECT);
+    rec.priority   = 0;
+    rec.src_domain = (uint8_t)(src_domain & 0xFFu);
+    rec.protocol   = (uint8_t)(src_protocol & 0xFFu);
+    rec.channel_id = (uint8_t)(src_channel_id & 0xFFu);
+    rec.operation  = dst_channel_id;
+    rec.checksum   = dst_domain;
+
+    uint32_t vals[4];
+    vals[0] = src_cap_mask;
+    vals[1] = dst_cap_mask;
+    vals[2] = 0u;
+    vals[3] = 0u;
+    uint32_t i;
+    for (i = 0; i < 4u; i++) {
+        rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
+        rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
+        rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
+        rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
+    }
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_chan_connect(uint32_t src_channel_id,
+                          uint32_t src_domain,
+                          uint32_t src_cap_mask,
+                          uint32_t src_protocol,
+                          uint32_t dst_channel_id,
+                          uint32_t dst_domain,
+                          uint32_t dst_cap_mask) {
+    if (!auditor_enabled)
+        return;
+    emit_chan_connect_record(src_channel_id, src_domain, src_cap_mask,
+                             src_protocol, dst_channel_id, dst_domain,
+                             dst_cap_mask);
+}
+
+/* DOMAIN_EDGE: policy mutation event. The full uint32 src/dst are stored
+ * in operation/checksum (current MAX_DOMAINS=8 fits in 8 bits, but this
+ * leaves room to grow without another version bump). */
+static void emit_domain_edge_record(uint32_t src_domain,
+                                    uint32_t dst_domain,
+                                    uint32_t added) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_DOMAIN_EDGE);
+    rec.priority   = 0;
+    rec.src_domain = (uint8_t)(src_domain & 0xFFu);
+    rec.protocol   = 0;
+    rec.channel_id = (uint8_t)(dst_domain & 0xFFu);
+    rec.operation  = src_domain;
+    rec.checksum   = dst_domain;
+
+    uint32_t vals[4];
+    vals[0] = added;
+    vals[1] = 0u;
+    vals[2] = 0u;
+    vals[3] = 0u;
+    uint32_t i;
+    for (i = 0; i < 4u; i++) {
+        rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
+        rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
+        rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
+        rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
+    }
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_domain_edge(uint32_t src_domain,
+                         uint32_t dst_domain,
+                         uint32_t added) {
+    if (!auditor_enabled)
+        return;
+    emit_domain_edge_record(src_domain, dst_domain, added);
+}
+
 /* ── DENY record emission ────────────────────────────────────────── */
 
 void auditor_deny(const auditor_deny_info_t *info) {

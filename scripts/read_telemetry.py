@@ -24,6 +24,27 @@ For DENY records (type=3), checksum encodes:
   [reason:8][dst_domain:8][dst_channel:8][reserved:8]
   and payload_hash encodes:
   [granted_caps:32][required_caps:32][dst_channel_id:32][zeros:32]
+
+For CHAN_CREATE records (type=5, v2+), the layout is:
+  operation     = cap_mask
+  checksum      = owner_task_id
+  payload_hash  = [domain:32][security_level:32][zeros:64]
+  src_domain/protocol/channel_id mirror the channel's policy.
+
+For CHAN_CONNECT records (type=6, v2+), the layout is:
+  channel_id    = src_channel_id (low 8)
+  src_domain    = src_channel_domain (low 8)
+  protocol      = src_channel_protocol (low 8)
+  operation     = dst_channel_id (full uint32)
+  checksum      = dst_channel_domain (full uint32)
+  payload_hash  = [src_cap_mask:32][dst_cap_mask:32][zeros:64]
+
+For DOMAIN_EDGE records (type=8, v2+), the layout is:
+  src_domain    = src_domain (low 8)
+  channel_id    = dst_domain (low 8, repurposed as 'dst slot')
+  operation     = src_domain (full uint32)
+  checksum      = dst_domain (full uint32)
+  payload_hash  = [added:32][zeros:96]   (added=1 means edge inserted)
 """
 
 import argparse
@@ -39,7 +60,9 @@ RECORD_SIZE = struct.calcsize(RECORD_FMT)
 
 assert RECORD_SIZE == 44, f"Format mismatch: expected 44 bytes, got {RECORD_SIZE}"
 
-REC_TYPE_NAME = {0: "MSG", 1: "OVERFLOW", 2: "HEARTBEAT", 3: "DENY"}
+REC_TYPE_NAME = {0: "MSG", 1: "OVERFLOW", 2: "HEARTBEAT", 3: "DENY",
+                 5: "CHAN_CREATE", 6: "CHAN_CONNECT",
+                 8: "DOMAIN_EDGE"}
 PRIO_NAME     = {0: "HIGH", 1: "MED", 2: "LOW"}
 PROTO_NAME    = {1: "PAIR", 2: "PUB", 3: "SUB", 4: "REQ", 5: "REP",
                  6: "PUSH", 7: "PULL", 8: "BUS", 9: "SURV", 10: "RESP"}
@@ -100,6 +123,43 @@ def format_record(r: dict) -> str:
 
     if r["type"] == 2:  # HEARTBEAT
         return f"[j={j:>7}]  HEARTBEAT"
+
+    if r["type"] == 5:  # CHAN_CREATE — structural event (v2+)
+        raw_hash = bytes.fromhex(r["payload_hash"])
+        full_domain  = _unpack_le32(raw_hash, 0)
+        sec_level    = _unpack_le32(raw_hash, 4)
+        owner_task   = r["checksum"]
+        cap_mask     = r["operation"]
+        return (
+            f"[j={j:>7}]  CHAN_CREATE "
+            f"ch={ch} owner_task={owner_task} "
+            f"caps=0x{cap_mask:X}[{caps_str(cap_mask)}] "
+            f"domain={full_domain} sec_lvl={sec_level} "
+            f"proto={proto}"
+        )
+
+    if r["type"] == 8:  # DOMAIN_EDGE — policy mutation event (v2+)
+        raw_hash = bytes.fromhex(r["payload_hash"])
+        added    = _unpack_le32(raw_hash, 0)
+        src_dom  = r["operation"]
+        dst_dom  = r["checksum"]
+        verb     = "added" if added == 1 else f"op={added}"
+        return (
+            f"[j={j:>7}]  DOMAIN_EDGE "
+            f"src_dom={src_dom} -> dst_dom={dst_dom} ({verb})"
+        )
+
+    if r["type"] == 6:  # CHAN_CONNECT — edge between two channels (v2+)
+        raw_hash = bytes.fromhex(r["payload_hash"])
+        src_caps = _unpack_le32(raw_hash, 0)
+        dst_caps = _unpack_le32(raw_hash, 4)
+        dst_ch   = r["operation"]
+        dst_dom  = r["checksum"]
+        return (
+            f"[j={j:>7}]  CHAN_CONNECT "
+            f"src=ch{ch}(dom={dom},proto={proto},caps=[{caps_str(src_caps)}]) "
+            f"-> dst=ch{dst_ch}(dom={dst_dom},caps=[{caps_str(dst_caps)}])"
+        )
 
     if r["type"] == 3:  # DENY — unpack structured fields
         reason_code = r["checksum"] & 0xFF
