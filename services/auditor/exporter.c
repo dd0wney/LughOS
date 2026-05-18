@@ -3,11 +3,6 @@
 #include "hardware.h"
 #include "interrupt.h"
 
-/* COM2 serial port base address (0x2F8) for dedicated telemetry stream */
-#define COM2_PORT  0x2F8u
-#define COM2_LSR   (COM2_PORT + 5u)
-#define COM2_THR_EMPTY 0x20u
-
 #define DRAIN_BATCH 32u
 
 ipc_ring_t       ipc_ring;
@@ -16,10 +11,23 @@ volatile uint8_t auditor_enabled = 0;
 static uint64_t tick_count       = 0;
 static uint32_t heartbeat_counter = 0;
 
-/* ── COM2 helpers ────────────────────────────────────────────────── */
+/* ── Telemetry sink ────────────────────────────────────────────────
+ * Per-arch backend writing fixed-size auditor_record_t records to a
+ * dedicated serial port, separate from the kernel log console.
+ *   x86 → COM2 (0x2F8) via 8250 I/O ports.
+ *   ARM → PL011 UART1 (0x101F2000) on versatilepb via MMIO.
+ * Capture from QEMU with a second -serial argument:
+ *   x86:  -serial mon:stdio -serial file:/tmp/lugh_ipc.bin
+ *   ARM:  -serial file:/tmp/lugh-arm.log -serial file:/tmp/lugh_ipc.bin
+ * The wire format is identical across arches — scripts/read_telemetry.py
+ * parses either capture identically. */
 
 #ifdef __i386__
-static void com2_init(void) {
+#define COM2_PORT      0x2F8u
+#define COM2_LSR       (COM2_PORT + 5u)
+#define COM2_THR_EMPTY 0x20u
+
+static void tlm_init(void) {
     outb(COM2_PORT + 1, 0x00);
     outb(COM2_PORT + 3, 0x80);
     outb(COM2_PORT + 0, 0x03);
@@ -29,7 +37,7 @@ static void com2_init(void) {
     outb(COM2_PORT + 4, 0x0B);
 }
 
-static void com2_write_bytes(const void *buf, uint32_t len) {
+static void tlm_write_bytes(const void *buf, uint32_t len) {
     const uint8_t *p = (const uint8_t *)buf;
     uint32_t i;
     for (i = 0; i < len; i++) {
@@ -38,17 +46,32 @@ static void com2_write_bytes(const void *buf, uint32_t len) {
         outb(COM2_PORT, p[i]);
     }
 }
+
+#elif defined(__arm__)
+/* PL011 UART1 on versatilepb. QEMU's PL011 model is usable from reset,
+ * so init is a no-op. DR at +0x00 (32-bit write, low byte to FIFO);
+ * FR at +0x18, bit 5 = TXFF (FIFO full). */
+#define PL011_U1_DR (*(volatile uint32_t *)(0x101F2000u + 0x00u))
+#define PL011_U1_FR (*(volatile uint32_t *)(0x101F2000u + 0x18u))
+#define PL011_FR_TXFF (1u << 5)
+
+static void tlm_init(void) { }
+
+static void tlm_write_bytes(const void *buf, uint32_t len) {
+    const uint8_t *p = (const uint8_t *)buf;
+    uint32_t i;
+    for (i = 0; i < len; i++) {
+        while ((PL011_U1_FR & PL011_FR_TXFF) != 0u) { }
+        PL011_U1_DR = (uint32_t)p[i];
+    }
+}
+
 #else
-/* Non-x86: telemetry I/O sink not yet wired. The record-formatting paths
- * still run (so DENY / MSG / overflow construction is exercised on every
- * target), but the bytes are discarded. Phase 2 routes ARM telemetry to
- * PL011 UART1 on versatilepb and RISC-V to a second SBI console; keeping
- * the formatting paths live now makes that switch a one-function change.
- *
- * Crucially this avoids the inb()-returns-0-forever infinite spin that
- * the x86 path takes on any architecture where inb is a no-op stub. */
-static void com2_init(void) { }
-static void com2_write_bytes(const void *buf, uint32_t len) {
+/* RISC-V and other targets: record formatting still runs so the paths
+ * stay exercised on every build, but bytes are discarded until a real
+ * sink is wired (likely a second SBI console). */
+static void tlm_init(void) { }
+static void tlm_write_bytes(const void *buf, uint32_t len) {
     (void)buf; (void)len;
 }
 #endif
@@ -96,7 +119,7 @@ static void emit_msg_record(const message_t *msg) {
     rec.operation   = msg->operation;
     rec.checksum    = msg->checksum;
     payload_fingerprint(msg->payload, rec.payload_hash);
-    com2_write_bytes(&rec, sizeof(rec));
+    tlm_write_bytes(&rec, sizeof(rec));
 }
 
 static void emit_overflow_record(uint32_t dropped) {
@@ -110,7 +133,7 @@ static void emit_overflow_record(uint32_t dropped) {
     rec.checksum   = 0;
     uint32_t i;
     for (i = 0; i < 16u; i++) rec.payload_hash[i] = 0;
-    com2_write_bytes(&rec, sizeof(rec));
+    tlm_write_bytes(&rec, sizeof(rec));
 }
 
 static void emit_heartbeat_record(void) {
@@ -124,7 +147,7 @@ static void emit_heartbeat_record(void) {
     rec.checksum   = 0;
     uint32_t i;
     for (i = 0; i < 16u; i++) rec.payload_hash[i] = 0;
-    com2_write_bytes(&rec, sizeof(rec));
+    tlm_write_bytes(&rec, sizeof(rec));
 }
 
 /* ── DENY record emission ────────────────────────────────────────── */
@@ -164,14 +187,14 @@ void auditor_deny(const auditor_deny_info_t *info) {
         rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
         rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
     }
-    com2_write_bytes(&rec, sizeof(rec));
+    tlm_write_bytes(&rec, sizeof(rec));
 }
 
 /* ── Service entry points ────────────────────────────────────────── */
 
 void auditor_init(void) {
     ring_init(&ipc_ring);
-    com2_init();
+    tlm_init();
     auditor_enabled = 1;
     log_message(LOG_INFO,
         "Auditor: armed (ring capacity=%u, record_size=%u)\n",
