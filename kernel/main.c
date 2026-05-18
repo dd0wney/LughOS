@@ -504,7 +504,12 @@ void test_task_caps(void) {
         child.domain         = 0u;
         child.state          = TASK_RUNNING;
         child.deadline       = 0u;
-        child.parent_task_id = TASK_PARENT_NONE; /* synthesized; J5 DENY reads this */
+        /* Pretend the synthesized child was spawned by kernel_task (id=1).
+         * The upcoming CAP_ESCALATION DENY then carries non-zero depth
+         * in the J6 lineage nibbles, exercising the depth-walk path
+         * (one hop to TASK_PARENT_NONE = root). Without this, the synthesized
+         * child would look like a root and depth would stay 0. */
+        child.parent_task_id = 1u;
         current_task = &child;
 
         int ch = ipc_create_channel(0u, 0u, CAP_ALL, NNG_PROTO_PUB0);
