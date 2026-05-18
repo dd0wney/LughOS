@@ -68,10 +68,21 @@ typedef enum {
  * stack reserved in kernel/sched/task.c (Phase 3 A2). Phase 3 A4 uses
  * this as the save/restore anchor for context switches.
  *
- * Layout note (Phase 3 A2): struct size grew from 32 bytes to 40 bytes.
- * Round-robin serialisation through scheduler_ops.get_state was narrowed
- * in A1 to just the cursor, so the size bump is not load-bearing for
- * any persisted state today. */
+ * Layout note (Phase 3 J0): struct size grew from 40 bytes (A2) to 44.
+ * parent_task_id is APPENDED at the end so offsets 0..40 stay byte-for-byte
+ * stable — kernel/arch/{arm,x86}/context_switch.S hardcodes
+ * TASK_SAVED_SP_OFFSET=36 and any insertion in the middle would shift
+ * saved_sp and break the context switch. Round-robin serialisation
+ * through scheduler_ops.get_state was narrowed in A1 to just the cursor,
+ * so neither the A2 nor the J0 size bump is load-bearing for any
+ * persisted state today.
+ *
+ * parent_task_id semantics (Phase 3 J0):
+ *   - TASK_PARENT_NONE = "no parent" (the kernel root task).
+ *   - Otherwise: task_id of the task that called create_task() to spawn
+ *     this one. The JEPA encoder uses this to reconstruct task lineage
+ *     from telemetry alone — TASK_CREATE and DENY records carry it
+ *     forward (see auditor.h for the wire layout). */
 typedef struct {
     uint32_t task_id;          /* unique non-zero id; 0 reserved for "no task" */
     int priority;              /* 0 (highest) to 10 (lowest) */
@@ -81,7 +92,14 @@ typedef struct {
     uint64_t deadline;         /* For future real-time scheduling */
     uint32_t kernel_stack_top; /* per-task kernel stack TOP (grows down); 0 = no stack */
     uint32_t saved_sp;         /* SP when task is descheduled (Phase 3 A4); 0 = never run */
+    uint32_t parent_task_id;   /* creator's task_id at create_task time; TASK_PARENT_NONE = root */
 } task_t;
+
+/* Sentinel for "no parent" — assigned to the kernel root task in
+ * task_init() and to any synthesized task_t in tests that doesn't
+ * have a real lineage. Any other value is the live task_id of the
+ * creator at create_task time. */
+#define TASK_PARENT_NONE 0xFFFFFFFFu
 
 /* Context switch — arch-specific assembly. Saves callee-saved regs of prev
  * onto prev's kernel stack, writes the resulting SP into prev->saved_sp,

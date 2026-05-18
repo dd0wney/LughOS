@@ -295,6 +295,96 @@ void auditor_domain_edge(uint32_t src_domain,
     emit_domain_edge_record(src_domain, dst_domain, added);
 }
 
+/* TASK_CREATE: lineage event. Field reuse mirrors auditor.h:
+ *   priority      = task.priority (clamped to uint8)
+ *   src_domain    = low 8 bits of task.domain
+ *   protocol      = 0   (tasks have no protocol)
+ *   channel_id    = 0
+ *   operation     = task.task_id      (full uint32)
+ *   checksum      = task.parent_task_id (TASK_PARENT_NONE for kernel root)
+ *   payload_hash  = [cap_mask:32][domain:32][stack_top:32][zeros:32]
+ *
+ * Together with TASK_EXIT (type=7) this gives the JEPA encoder enough
+ * to reconstruct task lifetimes and the lineage tree without polling
+ * the kernel task table. */
+static void emit_task_create_record(uint32_t task_id,
+                                    uint32_t parent_task_id,
+                                    uint32_t cap_mask,
+                                    uint32_t domain,
+                                    int      priority,
+                                    uint32_t kernel_stack_top) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_TASK_CREATE);
+    /* Priority is signed in task_t but always small and non-negative
+     * by convention (0=highest, 10=lowest). Clamp defensively so a
+     * future regression that lets a negative slip through doesn't
+     * silently become 0xFF on the wire. */
+    int p = priority;
+    if (p < 0) p = 0;
+    if (p > 255) p = 255;
+    rec.priority   = (uint8_t)p;
+    rec.src_domain = (uint8_t)(domain & 0xFFu);
+    rec.protocol   = 0;
+    rec.channel_id = 0;
+    rec.operation  = task_id;
+    rec.checksum   = parent_task_id;
+
+    uint32_t vals[4];
+    vals[0] = cap_mask;
+    vals[1] = domain;
+    vals[2] = kernel_stack_top;
+    vals[3] = 0u;
+    uint32_t i;
+    for (i = 0; i < 4u; i++) {
+        rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
+        rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
+        rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
+        rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
+    }
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_task_create(uint32_t task_id,
+                         uint32_t parent_task_id,
+                         uint32_t cap_mask,
+                         uint32_t domain,
+                         int      priority,
+                         uint32_t kernel_stack_top) {
+    if (!auditor_enabled)
+        return;
+    emit_task_create_record(task_id, parent_task_id, cap_mask, domain,
+                            priority, kernel_stack_top);
+}
+
+/* TASK_EXIT: lifecycle terminus event. Field reuse:
+ *   priority/src_domain/protocol/channel_id = 0
+ *   operation     = task_id  (full uint32)
+ *   checksum      = (uint32_t)exit_code  (signed int reinterpreted)
+ *   payload_hash  = zeros
+ *
+ * Emitted synchronously from SYS_EXIT BEFORE the TASK_TERMINATED
+ * state transition, so the caller's task_id is unambiguously the
+ * exiting task — not a recycled slot. */
+static void emit_task_exit_record(uint32_t task_id, int exit_code) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_TASK_EXIT);
+    rec.priority   = 0;
+    rec.src_domain = 0;
+    rec.protocol   = 0;
+    rec.channel_id = 0;
+    rec.operation  = task_id;
+    rec.checksum   = (uint32_t)exit_code;
+    uint32_t i;
+    for (i = 0; i < 16u; i++) rec.payload_hash[i] = 0;
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_task_exit(uint32_t task_id, int exit_code) {
+    if (!auditor_enabled)
+        return;
+    emit_task_exit_record(task_id, exit_code);
+}
+
 /* ── DENY record emission ────────────────────────────────────────── */
 
 void auditor_deny(const auditor_deny_info_t *info) {
@@ -316,22 +406,40 @@ void auditor_deny(const auditor_deny_info_t *info) {
                  | ((uint32_t)info->dst_domain   << 8)
                  | ((uint32_t)info->dst_channel  << 16);
 
-    /* payload_hash carries capability diagnostics:
-     * [0..3] granted_caps  [4..7] required_caps
-     * [8..11] dst_channel as full uint32  [12..15] zeros */
+    /* payload_hash carries capability diagnostics + lineage (J5/J6):
+     * [0..3]   granted_caps
+     * [4..7]   required_caps
+     * [8..11]  dst_channel as full uint32 (0xFFFFFFFF = none)
+     * [12..14] parent_task_id (24-bit; 0xFFFFFF = TASK_PARENT_NONE)
+     * [15]     [depth:4][sibling_count:4]   (J6; populated by emit sites)
+     *
+     * MAX_TASKS=1024 << 2^24 so 24 bits is comfortably future-proof
+     * for parent_task_id. The all-ones sentinel 0xFFFFFF compresses
+     * TASK_PARENT_NONE (which is 0xFFFFFFFF) — the decoder lifts it
+     * back to the full sentinel for display. */
     uint32_t i;
-    uint32_t vals[4];
+    uint32_t vals[3];
     vals[0] = info->granted_caps;
     vals[1] = info->required_caps;
     vals[2] = (info->dst_channel == 0xFFu) ? 0xFFFFFFFFu
                                             : (uint32_t)info->dst_channel;
-    vals[3] = 0u;
-    for (i = 0; i < 4u; i++) {
+    for (i = 0; i < 3u; i++) {
         rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
         rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
         rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
         rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
     }
+    /* Compress parent_task_id into 24 bits. TASK_PARENT_NONE (0xFFFFFFFF)
+     * lands as 0xFFFFFF — still all-ones in the truncated domain. */
+    uint32_t parent24 = info->parent_task_id & 0x00FFFFFFu;
+    rec.payload_hash[12] = (uint8_t)(parent24);
+    rec.payload_hash[13] = (uint8_t)(parent24 >> 8);
+    rec.payload_hash[14] = (uint8_t)(parent24 >> 16);
+    /* J6 nibbles: [depth:4][sibling_count:4]. Saturating-capped at 15
+     * by emit-site invariant; we don't re-clamp here. */
+    uint8_t depth  = info->lineage_depth & 0x0Fu;
+    uint8_t sibs   = info->sibling_count & 0x0Fu;
+    rec.payload_hash[15] = (uint8_t)((depth << 4) | sibs);
     tlm_write_bytes(&rec, sizeof(rec));
 }
 

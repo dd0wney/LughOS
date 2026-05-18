@@ -18,8 +18,10 @@
 #define AUDITOR_REC_OVERFLOW     1u  /* ring dropped N messages   */
 #define AUDITOR_REC_HEARTBEAT    2u  /* 1-second keepalive        */
 #define AUDITOR_REC_DENY         3u  /* capability/domain denied  */
+#define AUDITOR_REC_TASK_CREATE  4u  /* task spawned via create_task */
 #define AUDITOR_REC_CHAN_CREATE  5u  /* IPC channel created       */
 #define AUDITOR_REC_CHAN_CONNECT 6u  /* IPC channel connected     */
+#define AUDITOR_REC_TASK_EXIT    7u  /* task terminated via SYS_EXIT */
 #define AUDITOR_REC_DOMAIN_EDGE  8u  /* domain matrix mutation    */
 
 /* Fixed-size telemetry record emitted on COM2.
@@ -32,7 +34,24 @@
  *   DENY:        priority=attempted, src_domain, protocol, channel_id,
  *                operation=attempted OP_*, checksum=[reason:8][dst_domain:8][dst_channel:8][rsvd:8],
  *                payload_hash[0..3]=granted_caps, [4..7]=required_caps,
- *                [8..11]=dst_channel_id (0xFFFFFFFF if none), [12..15]=zeros
+ *                [8..11]=dst_channel_id (0xFFFFFFFF if none),
+ *                [12..14]=parent_task_id (24-bit; sentinel 0xFFFFFF = ROOT/none) (J5),
+ *                [15]=[depth:4 | sibling_count:4] (J6).
+ *                Phase 3 J5 ate the first three bytes of the previously-zero
+ *                [12..15] slot for parent_task_id; J6 reserves the final
+ *                byte for the lineage depth + sibling count packed nibbles.
+ *                MAX_TASKS=1024 fits in 24 bits with room to spare;
+ *                depth/sibling_count are saturating-capped at 15.
+ *   TASK_CREATE: priority=task.priority (clamped to uint8), src_domain=task.domain (low 8),
+ *                protocol=0, channel_id=0,
+ *                operation=task.task_id, checksum=task.parent_task_id,
+ *                payload_hash[0..3]=task.cap_mask,
+ *                payload_hash[4..7]=task.domain (full uint32 — handles >255 domains),
+ *                payload_hash[8..11]=task.kernel_stack_top,
+ *                payload_hash[12..15]=zeros.
+ *                Emitted synchronously at the end of create_task on
+ *                the success path. Together with TASK_EXIT this lets
+ *                the encoder track task lifetimes without polling.
  *   CHAN_CREATE: priority=0, src_domain=channel.domain (low 8),
  *                protocol=channel.protocol, channel_id=channel.id,
  *                operation=channel.cap_mask, checksum=channel.owner_task_id,
@@ -61,6 +80,13 @@
  *                Emitted by every successful domain_edge_set so the
  *                JEPA encoder sees policy mutations as first-class
  *                events.
+ *   TASK_EXIT:   priority=0, src_domain=0, protocol=0, channel_id=0,
+ *                operation=task_id, checksum=(uint32_t)exit_code,
+ *                payload_hash[0..15]=zeros.
+ *                Emitted synchronously from the SYS_EXIT syscall before
+ *                the TASK_TERMINATED transition, so the caller's task_id
+ *                is still queryable. Pairs with TASK_CREATE so the
+ *                encoder can compute task lifetimes from telemetry alone.
  */
 typedef struct __attribute__((packed)) {
     uint32_t magic;           /* AUDITOR_MAGIC                        */
@@ -76,7 +102,16 @@ typedef struct __attribute__((packed)) {
     uint8_t  payload_hash[16];/* 4×FNV-1a-32 (MSG) or cap diag (DENY)*/
 } auditor_record_t;           /* sizeof = 44 bytes, fixed              */
 
-/* Context passed to auditor_deny() — assembled by ipc.c from channel table. */
+/* Context passed to auditor_deny() — assembled by ipc.c from channel table.
+ *
+ * parent_task_id (J5) carries the caller's lineage at deny time so the
+ * JEPA encoder can correlate denials with the task that spawned the
+ * offender. Pass TASK_PARENT_NONE if current_task is NULL (eg auditor
+ * tests calling the path before task_init).
+ *
+ * lineage_depth + sibling_count (J6) are computed by the emit site
+ * before calling auditor_deny — bounded saturating walk of tasks[].
+ * Each is clamped to 4 bits (max 15). */
 typedef struct {
     uint8_t  src_domain;
     uint8_t  dst_domain;      /* 0xFF if no destination channel */
@@ -89,6 +124,10 @@ typedef struct {
     uint32_t operation;
     uint32_t granted_caps;
     uint32_t required_caps;
+    uint32_t parent_task_id;  /* TASK_PARENT_NONE if no parent (root or no current_task) */
+    uint8_t  lineage_depth;   /* J6: 0..15, saturating; 0 = root */
+    uint8_t  sibling_count;   /* J6: 0..15, saturating; tasks sharing parent_task_id */
+    uint8_t  _pad2[2];
 } auditor_deny_info_t;
 
 /* Exported globals — defined in services/auditor/exporter.c */
@@ -132,5 +171,27 @@ void auditor_chan_connect(uint32_t src_channel_id,
 void auditor_domain_edge(uint32_t src_domain,
                          uint32_t dst_domain,
                          uint32_t added);
+
+/* Task lifecycle events — emitted synchronously (no ring) so the JEPA
+ * encoder sees TASK_CREATE strictly before any subsequent event that
+ * references task_id, and TASK_EXIT strictly before the scheduler
+ * transition that retires the task.
+ *
+ * task_id          — newly-allocated id (TASK_CREATE) or terminating id (TASK_EXIT)
+ * parent_task_id   — current_task->task_id at create time
+ * cap_mask         — effective caps after bounded-narrowing
+ * domain           — full 32-bit security domain
+ * priority         — task's scheduling priority (passed as int; clamped to uint8 on the wire)
+ * kernel_stack_top — physical kernel stack TOP (0 if exceeded MAX_RUNNABLE)
+ * exit_code        — caller-supplied SYS_EXIT argument
+ */
+void auditor_task_create(uint32_t task_id,
+                         uint32_t parent_task_id,
+                         uint32_t cap_mask,
+                         uint32_t domain,
+                         int      priority,
+                         uint32_t kernel_stack_top);
+
+void auditor_task_exit(uint32_t task_id, int exit_code);
 
 #endif /* AUDITOR_H */

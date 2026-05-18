@@ -466,21 +466,23 @@ void test_task_caps(void) {
      *    parent holding only CAP_IPC_SEND must be narrowed to CAP_IPC_SEND ── */
     {
         task_t restricted_parent;
-        restricted_parent.task_id  = 0u;
-        restricted_parent.priority = 5;
-        restricted_parent.cap_mask = CAP_IPC_SEND;
-        restricted_parent.domain   = 0u;
-        restricted_parent.state    = TASK_RUNNING;
-        restricted_parent.deadline = 0u;
+        restricted_parent.task_id        = 0u;
+        restricted_parent.priority       = 5;
+        restricted_parent.cap_mask       = CAP_IPC_SEND;
+        restricted_parent.domain         = 0u;
+        restricted_parent.state          = TASK_RUNNING;
+        restricted_parent.deadline       = 0u;
+        restricted_parent.parent_task_id = TASK_PARENT_NONE; /* synthesized; no lineage */
         current_task = &restricted_parent;
 
         task_t spec;
-        spec.task_id  = 0u;
-        spec.priority = 6;
-        spec.cap_mask = CAP_ALL;       /* tries to grab everything */
-        spec.domain   = 0u;
-        spec.state    = TASK_READY;
-        spec.deadline = 0u;
+        spec.task_id        = 0u;
+        spec.priority       = 6;
+        spec.cap_mask       = CAP_ALL;       /* tries to grab everything */
+        spec.domain         = 0u;
+        spec.state          = TASK_READY;
+        spec.deadline       = 0u;
+        spec.parent_task_id = TASK_PARENT_NONE; /* create_task overwrites it; init for determinism */
         int rv = create_task(&spec);
         if (rv == 0 && spec.cap_mask == CAP_IPC_SEND) {
             log_message(LOG_INFO,
@@ -498,12 +500,18 @@ void test_task_caps(void) {
     /* ── Subtest 2: a restricted task cannot mint a CAP_ALL channel ── */
     {
         task_t child;
-        child.task_id  = 1000u;
-        child.priority = 5;
-        child.cap_mask = CAP_IPC_SEND | CAP_IPC_RECV;
-        child.domain   = 0u;
-        child.state    = TASK_RUNNING;
-        child.deadline = 0u;
+        child.task_id        = 1000u;
+        child.priority       = 5;
+        child.cap_mask       = CAP_IPC_SEND | CAP_IPC_RECV;
+        child.domain         = 0u;
+        child.state          = TASK_RUNNING;
+        child.deadline       = 0u;
+        /* Pretend the synthesized child was spawned by kernel_task (id=1).
+         * The upcoming CAP_ESCALATION DENY then carries non-zero depth
+         * in the J6 lineage nibbles, exercising the depth-walk path
+         * (one hop to TASK_PARENT_NONE = root). Without this, the synthesized
+         * child would look like a root and depth would stay 0. */
+        child.parent_task_id = 1u;
         current_task = &child;
 
         int ch = ipc_create_channel(0u, 0u, CAP_ALL, NNG_PROTO_PUB0);
@@ -522,12 +530,13 @@ void test_task_caps(void) {
     /* ── Subtest 3: the same restricted task CAN create a within-caps channel ── */
     {
         task_t child;
-        child.task_id  = 1001u;
-        child.priority = 5;
-        child.cap_mask = CAP_IPC_SEND | CAP_IPC_RECV;
-        child.domain   = 0u;
-        child.state    = TASK_RUNNING;
-        child.deadline = 0u;
+        child.task_id        = 1001u;
+        child.priority       = 5;
+        child.cap_mask       = CAP_IPC_SEND | CAP_IPC_RECV;
+        child.domain         = 0u;
+        child.state          = TASK_RUNNING;
+        child.deadline       = 0u;
+        child.parent_task_id = TASK_PARENT_NONE; /* synthesized; no DENY here but be consistent */
         current_task = &child;
 
         int ch = ipc_create_channel(0u, 0u, CAP_IPC_SEND, NNG_PROTO_PUB0);
@@ -1148,12 +1157,13 @@ void kmain(void) {
     // then runs as user_init_task, so the bootstrap channel inherits
     // the same narrow cap_mask — sending OP_DELETE / OP_WRITE through
     // it will produce a DENY_CAP_PRIV auditor record.
-    user_init_task.task_id  = 0;
-    user_init_task.priority = 5;
-    user_init_task.cap_mask = CAP_IPC_SEND;
-    user_init_task.domain   = 0;
-    user_init_task.state    = TASK_READY;
-    user_init_task.deadline = 0;
+    user_init_task.task_id        = 0;
+    user_init_task.priority       = 5;
+    user_init_task.cap_mask       = CAP_IPC_SEND;
+    user_init_task.domain         = 0;
+    user_init_task.state          = TASK_READY;
+    user_init_task.deadline       = 0;
+    user_init_task.parent_task_id = TASK_PARENT_NONE; /* create_task overwrites it from current_task */
     if (create_task(&user_init_task) != 0) {
         log_message(LOG_ERROR, "Failed to create user_init_task\n");
     } else {
