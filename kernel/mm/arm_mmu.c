@@ -1,6 +1,26 @@
 #include "lugh.h"
 #include "memory.h"
 
+/* Cross-arch MMU surface (Phase 3 B3 + B4 + B5).
+ *
+ * Despite the file name, this is the central per-arch MMU dispatcher:
+ *   __arm__  — real implementation (B3 enable + B4 AP enforcement).
+ *   __i386__ — TBD (Phase 3 B2, on the Linux box where x86 builds).
+ *   __riscv  — Sv32/Sv39 not implemented; the stubs below are the
+ *              B5 deliverable so `make riscv` compiles. Runtime is
+ *              no-op: kernel runs without MMU on RISC-V for now.
+ *
+ * All three architectures expose the same three public symbols
+ * (arm_mmu_init, arm_section_set_ap, arm_tlb_invalidate_all) so
+ * kmain doesn't need per-arch `#if` ladders around the call sites.
+ *
+ * The historical name `arm_mmu.c` predates B5; renaming to mm/mmu.c
+ * would be cleaner but churns Makefile + git history without buying
+ * anything functional. Deferred to Phase 4 cleanup.
+ *
+ * ─── original B3 design notes ───
+ *
+ */
 /* ARMv5TE MMU enable (Phase 3 B3) — atomic single-commit per advisor:
  * the kernel cannot run "half-MMU." Every region the kernel will touch
  * after enable MUST be mapped before SCTLR.M is set, and DACR must be
