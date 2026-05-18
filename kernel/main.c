@@ -341,8 +341,35 @@ void test_ipc_enforcement(void) {
         ipc_close_channel(ch_b);
     }
 
+    /* ── Subtest 4: same-domain ipc_connect succeeds — emits CHAN_CONNECT.
+     * Doesn't disturb the deny-path assertions above; runs only after them
+     * so a failure here can't mask an earlier deny failure. */
+    {
+        int ch_a = ipc_create_channel(0, 0, CAP_IPC_SEND | CAP_IPC_RECV,
+                                      NNG_PROTO_PUSH0);
+        int ch_b = ipc_create_channel(0, 0, CAP_IPC_SEND | CAP_IPC_RECV,
+                                      NNG_PROTO_PULL0);
+        if (ch_a < 0 || ch_b < 0) {
+            log_message(LOG_ERROR, "Enforcement test 4: create failed\n");
+            goto done;
+        }
+        int rv = ipc_connect(ch_a, ch_b);
+        if (rv == 0) {
+            log_message(LOG_INFO,
+                "Enforcement test 4 PASS: same-domain connect allowed "
+                "(CHAN_CONNECT record emitted)\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Enforcement test 4 FAIL: expected 0, got %d\n", rv);
+        }
+        auditor_tick();
+        ipc_close_channel(ch_a);
+        ipc_close_channel(ch_b);
+    }
+
 done:
-    log_message(LOG_INFO, "IPC enforcement tests: %d/3 passed\n", pass);
+    log_message(LOG_INFO, "IPC enforcement tests: %d/4 passed\n", pass);
 }
 
 /* Test task-bound capabilities: a child task cannot escalate beyond its

@@ -194,6 +194,17 @@ int ipc_connect(int src_id, int dst_id) {
         log_message(LOG_ERROR, "ipc_connect: nng_connect failed: %d\n", rv);
         return rv;
     }
+
+    /* Structural event: an edge now exists from src -> dst. Emit on
+     * the success branch only; denials use the existing DENY record. */
+    auditor_chan_connect((uint32_t)src_id,
+                         channels[src_id].domain,
+                         channels[src_id].cap_mask,
+                         (uint32_t)channels[src_id].socket.protocol,
+                         (uint32_t)dst_id,
+                         channels[dst_id].domain,
+                         channels[dst_id].cap_mask);
+
     log_message(LOG_DEBUG, "Connected ch%d(dom=%u) -> ch%d(dom=%u)\n",
         src_id, channels[src_id].domain, dst_id, channels[dst_id].domain);
     return 0;

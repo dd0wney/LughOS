@@ -19,6 +19,7 @@
 #define AUDITOR_REC_HEARTBEAT    2u  /* 1-second keepalive        */
 #define AUDITOR_REC_DENY         3u  /* capability/domain denied  */
 #define AUDITOR_REC_CHAN_CREATE  5u  /* IPC channel created       */
+#define AUDITOR_REC_CHAN_CONNECT 6u  /* IPC channel connected     */
 
 /* Fixed-size telemetry record emitted on COM2.
  * 44 bytes packed. Python struct format: '<IHHQBBBBII16s'
@@ -40,6 +41,17 @@
  *                Re-uses existing 44-byte layout (no struct growth) — the
  *                python decoder unpacks owner_task_id from checksum and
  *                full-width domain from payload_hash[0..3].
+ *   CHAN_CONNECT: priority=0, src_domain=src_channel.domain (low 8),
+ *                protocol=src_channel.protocol, channel_id=src_channel.id,
+ *                operation=dst_channel.id (full uint32 — survives table growth),
+ *                checksum=dst_channel.domain (full uint32),
+ *                payload_hash[0..3]=src_channel.cap_mask,
+ *                payload_hash[4..7]=dst_channel.cap_mask,
+ *                payload_hash[8..15]=zeros.
+ *                Emitted on the success branch of ipc_connect only —
+ *                denials use the existing DENY record. Together
+ *                CREATE+CONNECT let the encoder reconstruct the channel
+ *                graph (nodes + edges) from telemetry alone.
  */
 typedef struct __attribute__((packed)) {
     uint32_t magic;           /* AUDITOR_MAGIC                        */
@@ -95,5 +107,15 @@ void auditor_chan_create(uint32_t channel_id,
                          uint32_t domain,
                          uint32_t security_level,
                          uint32_t protocol);
+
+/* src/dst channel ids must reference existing channels; caller already
+ * passed the connect's policy check by the time this fires. */
+void auditor_chan_connect(uint32_t src_channel_id,
+                          uint32_t src_domain,
+                          uint32_t src_cap_mask,
+                          uint32_t src_protocol,
+                          uint32_t dst_channel_id,
+                          uint32_t dst_domain,
+                          uint32_t dst_cap_mask);
 
 #endif /* AUDITOR_H */

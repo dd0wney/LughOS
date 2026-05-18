@@ -206,6 +206,57 @@ void auditor_chan_create(uint32_t channel_id,
                             domain, security_level, protocol);
 }
 
+/* CHAN_CONNECT: success-branch edge event. Packing (mirrors auditor.h):
+ *   operation     = dst_channel_id  (full uint32 so future MAX_IPC_CHANNELS
+ *                                    growth past 256 doesn't lose the dst)
+ *   checksum      = dst_domain      (full uint32)
+ *   payload_hash  = [src_cap_mask:32][dst_cap_mask:32][zeros:64]
+ */
+static void emit_chan_connect_record(uint32_t src_channel_id,
+                                     uint32_t src_domain,
+                                     uint32_t src_cap_mask,
+                                     uint32_t src_protocol,
+                                     uint32_t dst_channel_id,
+                                     uint32_t dst_domain,
+                                     uint32_t dst_cap_mask) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_CHAN_CONNECT);
+    rec.priority   = 0;
+    rec.src_domain = (uint8_t)(src_domain & 0xFFu);
+    rec.protocol   = (uint8_t)(src_protocol & 0xFFu);
+    rec.channel_id = (uint8_t)(src_channel_id & 0xFFu);
+    rec.operation  = dst_channel_id;
+    rec.checksum   = dst_domain;
+
+    uint32_t vals[4];
+    vals[0] = src_cap_mask;
+    vals[1] = dst_cap_mask;
+    vals[2] = 0u;
+    vals[3] = 0u;
+    uint32_t i;
+    for (i = 0; i < 4u; i++) {
+        rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
+        rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
+        rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
+        rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
+    }
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_chan_connect(uint32_t src_channel_id,
+                          uint32_t src_domain,
+                          uint32_t src_cap_mask,
+                          uint32_t src_protocol,
+                          uint32_t dst_channel_id,
+                          uint32_t dst_domain,
+                          uint32_t dst_cap_mask) {
+    if (!auditor_enabled)
+        return;
+    emit_chan_connect_record(src_channel_id, src_domain, src_cap_mask,
+                             src_protocol, dst_channel_id, dst_domain,
+                             dst_cap_mask);
+}
+
 /* ── DENY record emission ────────────────────────────────────────── */
 
 void auditor_deny(const auditor_deny_info_t *info) {
