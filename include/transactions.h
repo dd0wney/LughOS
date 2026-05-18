@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "lugh.h"  /* txn_log_entry_t */
 
 /* Hot-swappable storage backend interface. Mirrors scheduler_ops_t in
  * include/lugh.h — every backend is a vtable of named methods so the
@@ -23,6 +24,23 @@ typedef struct {
 
 /* Concrete in-memory storage backend. Defined in services/storage/storage.c. */
 extern storage_ops_t memory_storage_ops;
+
+/* Bounded sizing constants for the in-memory storage backend. */
+#define MAX_CHECKPOINTS  16u
+#define CHECKPOINT_SIZE  4096u
+
+/**
+ * Register a labeled in-memory buffer that create_checkpoint can read
+ * from and restore_checkpoint can write back to. The buffer pointer is
+ * stored — no copy is taken — so the lifetime of *data must outlive any
+ * subsequent checkpoint operation referencing key.
+ *
+ * @param key   stable identifier (≤63 chars + NUL)
+ * @param data  caller-owned buffer
+ * @param size  byte length of *data (≤ CHECKPOINT_SIZE)
+ * @return 0 on success, -1 on bad args / table full / size overflow
+ */
+int storage_register_buffer(const char *key, void *data, size_t size);
 
 /**
  * Generate a unique transaction ID.
@@ -67,13 +85,22 @@ int remove_checkpoint(const char *checkpoint);
 int copy_file(const char *src, const char *dst);
 
 /**
- * Log a transaction operation for audit trail.
- * 
- * @param operation Type of operation (e.g., "Checkpoint", "Rollback")
- * @param src Source path (if applicable)
- * @param dst Destination path (if applicable)
+ * Append a transaction entry to the bounded global ring.
+ *
+ * Implementation in kernel/fs/storage.c. On overflow the oldest entry
+ * is dropped, the local overflow counter is bumped, and
+ * ipc_ring.overflow is bumped so the next auditor_tick() emits an
+ * OVERFLOW telemetry record.
+ *
+ * @param entry caller-owned entry; task_id is stamped from
+ *              current_task if entry->task_id == 0 on entry
+ * @return 0 on success, -1 if entry == NULL
  */
-void log_transaction(const char *operation, const char *src, const char *dst);
+int log_transaction(txn_log_entry_t* entry);
+
+/* Read-only accessors for tests / introspection. */
+uint32_t txn_log_get_overflow(void);
+uint32_t txn_log_get_depth(void);
 
 /**
  * Install an update to the system.
