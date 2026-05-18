@@ -30,15 +30,35 @@ arm_svc_panic:
     mov r0, #'S'
     b   _arm_panic_print
 
+@ Prefetch abort — capture fault PC + SPSR, dump via C helper, then loop.
+@ Phase 4 F2 instrumentation: the EXC:P from the user_hello regression
+@ now arrives with diagnostic info (faulting VA + pre-fault CPSR) so the
+@ Phase 4 F3 graceful handler has the data it needs to decide who to
+@ terminate. On ARMv5 the faulting instruction's address is LR_abt - 4.
 .global arm_pabort_panic
 arm_pabort_panic:
-    mov r0, #'P'
-    b   _arm_panic_print
+    sub  r0, lr, #4                 @ r0 = faulting instruction VA
+    mrs  r1, spsr                   @ r1 = SPSR_abt (pre-fault CPSR)
+    @ Make sure we have a usable abort-mode stack for the bl below.
+    @ boot_arm.S set ABT SP at 0xE0000 with 64 KB headroom.
+    bl   arm_pabort_diagnose        @ C: dumps "PABORT: pc=... cpsr=..."
+    mov  r0, #'P'
+    b    _arm_panic_print
 
+@ Data abort — same idea but the fault VA is in DFAR (Data Fault
+@ Address Register, CP15 c6,c0,0) and the status in DFSR (c5,c0,0).
+@ LR_abt for data abort points past the faulting instruction +8 (ARMv5),
+@ so the load-pair format is slightly different. The F3 commit will
+@ replace this stub with a graceful handler; for F2 we just instrument.
 .global arm_dabort_panic
 arm_dabort_panic:
-    mov r0, #'D'
-    b   _arm_panic_print
+    sub  r0, lr, #8                 @ r0 = faulting instruction VA
+    mrc  p15, 0, r1, c6, c0, 0      @ r1 = DFAR (data fault address)
+    mrc  p15, 0, r2, c5, c0, 0      @ r2 = DFSR (data fault status)
+    mrs  r3, spsr                   @ r3 = SPSR_abt (pre-fault CPSR)
+    bl   arm_dabort_diagnose        @ C: dumps full diagnosis
+    mov  r0, #'D'
+    b    _arm_panic_print
 
 .global arm_reserved_panic
 arm_reserved_panic:

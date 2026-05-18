@@ -1,0 +1,29 @@
+{
+  "project": "lughos",
+  "comment": "Phase 4 Theme 1 — memory protection deepening. Six commits that close the loop on 'protection is real' by making per-task PDs, 4 KB user mappings, graceful data-abort handling, and the deliberate-fault test all work together. F2 debugs the user_hello-hang regression that B4 surfaced as EXC:P.",
+  "tasks": [
+    {"id": "F1-kernel-task-event",   "track": "phase4-theme1", "status": "completed",
+     "title": "Emit synthetic TASK_CREATE for kernel_task so audit stream is self-contained (closes J9 doc-gap)",
+     "result": "Landed b34f521."},
+    {"id": "F2-user-hello-diag",     "track": "phase4-theme1", "status": "completed",
+     "title": "Instrument prefetch abort handler to dump fault PC/LR/SPSR; diagnose user_hello EXC:P",
+     "result": "Diagnosed: kernel heap (mm/memory.c MEMORY_REGION_HEAP_START=0x400000) overlaps user binary load region. Successful kmalloc inside ipc_send overwrites user code; PC=0 fault is downstream consequence. Filed as F2b. F3 unblocked; F6 blocked by F2b."},
+    {"id": "F2b-relocate-heap",      "track": "phase4-theme1", "status": "pending",
+     "title": "Relocate kernel heap out of user load region (0x400000-0x800000) to unblock F6 deliberate-fault test"},
+    {"id": "F3-abort-handler",       "track": "phase4-theme1", "status": "pending",
+     "title": "Graceful data-abort handler: read DFAR/DFSR, terminate offending task, schedule next (replaces EXC:D busy-loop)"},
+    {"id": "F4-l2-page-tables",      "track": "phase4-theme1", "status": "pending",
+     "title": "L2 page tables for 4 KB granularity user mappings on at least one section"},
+    {"id": "F5-per-task-pds",        "track": "phase4-theme1", "status": "pending",
+     "title": "Per-task page directories: task_t.page_dir_phys + context switch loads TTBR0 + per-task L1 allocation"},
+    {"id": "F6-deliberate-fault",    "track": "phase4-theme1", "status": "pending",
+     "title": "Real B6 test: user-mode write to RO page triggers data abort, graceful handler terminates task, test continues"}
+  ],
+  "deps": [
+    {"from": "F4-l2-page-tables",   "to": "F3-abort-handler"},
+    {"from": "F5-per-task-pds",     "to": "F4-l2-page-tables"},
+    {"from": "F6-deliberate-fault", "to": "F3-abort-handler"},
+    {"from": "F6-deliberate-fault", "to": "F4-l2-page-tables"},
+    {"from": "F6-deliberate-fault", "to": "F2b-relocate-heap"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "project": "lughos",
+  "comment": "Bug tracking — discrete defects found during Phase 3 work.",
+  "tasks": [
+    {"id": "user-hello-hang", "track": "bugs", "status": "diagnosed",
+     "title": "user_hello hangs after OP_GRID_ALERT IPC — next print() syscall never fires. Pre-existing regression visible at A2-committed; unrelated to A3. Kernel tests unaffected. Suspect user-side rodata/relocation in `-b binary` ld embedding (advisor hypothesis), not syscall.c or auditor.",
+     "result": "Root cause: kernel heap MEMORY_REGION_HEAP_START=0x400000 (kernel/mm/memory.c:13) collides with user binary load region. Successful kmalloc inside ipc_send (only on cap-granted ops like OP_GRID_ALERT) overwrites user code; the post-svc `pop {r4-r7, pc}` reads garbage and control flow eventually lands in section 0 (kernel-only AP=01) → PABORT at PC=0 after B4. Discriminator: cap-denied OP_WRITE never kmallocs, never faults. Diagnosed via F2 instrumentation. Fix tracked as phase4-theme1/F2b-relocate-heap; not blocking F3."}
+  ],
+  "deps": []
+}
