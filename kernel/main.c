@@ -31,6 +31,15 @@ int  ipc_close_channel(int channel_id);
 
 extern scheduler_ops_t rr_scheduler;
 
+/* The user-mode IPC bootstrap. user_init_task is the identity user
+ * programs run as in Phase 3 — narrowed caps (CAP_IPC_SEND only) so
+ * the existing escalation gate in ipc_create_channel actually bites
+ * when user code asks for privileged ops. user_bootstrap_channel is
+ * the single channel SYS_IPC_SEND routes through (channel-id is not
+ * in the syscall ABI in Phase 3; extending it is Phase 4). */
+static task_t user_init_task;
+int user_bootstrap_channel = -1;
+
 // Test NNG messaging functionality
 void test_nng(void) {
     log_message(LOG_INFO, "Testing NNG messaging functionality...\n");
@@ -689,6 +698,36 @@ void kmain(void) {
     
     // Initialize user mode subsystem
     log_message(LOG_INFO, "Initializing user mode subsystem\n");
+
+    // Establish the user identity before any user-mode code runs.
+    // Bounded-narrowing inheritance in create_task means user_init_task
+    // cannot widen caps beyond CAP_IPC_SEND. ipc_create_channel below
+    // then runs as user_init_task, so the bootstrap channel inherits
+    // the same narrow cap_mask — sending OP_DELETE / OP_WRITE through
+    // it will produce a DENY_CAP_PRIV auditor record.
+    user_init_task.task_id  = 0;
+    user_init_task.priority = 5;
+    user_init_task.cap_mask = CAP_IPC_SEND;
+    user_init_task.domain   = 0;
+    user_init_task.state    = TASK_READY;
+    user_init_task.deadline = 0;
+    if (create_task(&user_init_task) != 0) {
+        log_message(LOG_ERROR, "Failed to create user_init_task\n");
+    } else {
+        current_task = &user_init_task;
+        user_bootstrap_channel = ipc_create_channel(0u, 0u, CAP_IPC_SEND,
+                                                    NNG_PROTO_PUB0);
+        if (user_bootstrap_channel < 0) {
+            log_message(LOG_ERROR,
+                "Failed to create user bootstrap channel (rv=%d)\n",
+                user_bootstrap_channel);
+        } else {
+            log_message(LOG_INFO,
+                "user_init_task ready (id=%u caps=0x%X) on channel %d\n",
+                user_init_task.task_id, user_init_task.cap_mask,
+                user_bootstrap_channel);
+        }
+    }
     
     // The following would normally be loaded by a dynamic loader or initrd
     // For now, we'll just hardcode a test address
