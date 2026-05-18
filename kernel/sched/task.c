@@ -8,6 +8,27 @@
 static task_t tasks[MAX_TASKS];
 static uint32_t task_count = 0;
 
+/* Per-task kernel-mode stacks (Phase 3 A2). MAX_RUNNABLE caps how many
+ * tasks can be concurrently schedulable; tasks created beyond that cap
+ * get kernel_stack_top = 0 and are not eligible for context switching.
+ * 8 × 16 KB = 128 KB static — comfortably bounded for an MVP, easy to
+ * raise later if needed.
+ *
+ * 16-byte alignment matches AAPCS stack requirements on ARM (and is
+ * over-aligned for x86, which is fine). */
+#define MAX_RUNNABLE      8u
+#define KERNEL_STACK_SIZE 16384u
+
+static uint8_t kernel_stacks[MAX_RUNNABLE][KERNEL_STACK_SIZE]
+    __attribute__((aligned(16)));
+
+/* Assign the next available stack slot to a task. Returns the TOP
+ * address (high end, since stacks grow down) or 0 if none free. */
+static uint32_t assign_kernel_stack(uint32_t slot) {
+    if (slot >= MAX_RUNNABLE) return 0u;
+    return (uint32_t)(uintptr_t)&kernel_stacks[slot][KERNEL_STACK_SIZE];
+}
+
 /* current_task points into tasks[] above (NOT a free-standing static).
  * Same address as the scheduler walks, so context switches and cap
  * checks operate on identical state. */
@@ -30,17 +51,19 @@ void task_init(void) {
      * including this slot, but kernel_task's state stays RUNNING so
      * the round-robin walker doesn't accidentally schedule it. */
     task_t* kt = &tasks[0];
-    kt->task_id  = allocate_task_id();
-    kt->priority = 0;
-    kt->cap_mask = CAP_ALL;
-    kt->domain   = 0u;
-    kt->state    = TASK_RUNNING;
-    kt->deadline = 0u;
+    kt->task_id          = allocate_task_id();
+    kt->priority         = 0;
+    kt->cap_mask         = CAP_ALL;
+    kt->domain           = 0u;
+    kt->state            = TASK_RUNNING;
+    kt->deadline         = 0u;
+    kt->kernel_stack_top = assign_kernel_stack(0u);
+    kt->_padding1        = 0u;
     task_count = 1u;
     current_task = kt;
     log_message(LOG_INFO,
-        "Task subsystem: kernel_task ready (id=%u, caps=0x%X, domain=%u)\n",
-        kt->task_id, kt->cap_mask, kt->domain);
+        "Task subsystem: kernel_task ready (id=%u, caps=0x%X, domain=%u, stack_top=0x%X)\n",
+        kt->task_id, kt->cap_mask, kt->domain, kt->kernel_stack_top);
 }
 
 /* ── Public accessors for the unified task table ──────────────────
@@ -104,22 +127,33 @@ int create_task(task_t* spec) {
             spec->cap_mask, effective_caps, current_task->cap_mask);
     }
 
-    task_t* t = &tasks[task_count++];
-    t->task_id  = allocate_task_id();
-    t->priority = spec->priority;
-    t->cap_mask = effective_caps;
-    t->domain   = spec->domain;
-    t->state    = TASK_READY;
-    t->deadline = spec->deadline;
+    uint32_t slot = task_count++;
+    task_t* t = &tasks[slot];
+    t->task_id          = allocate_task_id();
+    t->priority         = spec->priority;
+    t->cap_mask         = effective_caps;
+    t->domain           = spec->domain;
+    t->state            = TASK_READY;
+    t->deadline         = spec->deadline;
+    t->kernel_stack_top = assign_kernel_stack(slot);
+    t->_padding1        = 0u;
+
+    if (t->kernel_stack_top == 0u) {
+        log_message(LOG_WARNING,
+            "create_task: task %u exceeds MAX_RUNNABLE=%u; no kernel stack "
+            "(task created but not schedulable until A4 lifecycle lands)\n",
+            t->task_id, (unsigned int)MAX_RUNNABLE);
+    }
 
     /* Mirror the assigned values back into spec so the caller can use
      * it as the task descriptor without re-fetching from the table. */
-    spec->task_id  = t->task_id;
-    spec->cap_mask = t->cap_mask;
-    spec->state    = t->state;
+    spec->task_id          = t->task_id;
+    spec->cap_mask         = t->cap_mask;
+    spec->state            = t->state;
+    spec->kernel_stack_top = t->kernel_stack_top;
 
     log_message(LOG_INFO,
-        "Created task id=%u priority=%d caps=0x%X domain=%u\n",
-        t->task_id, t->priority, t->cap_mask, t->domain);
+        "Created task id=%u priority=%d caps=0x%X domain=%u stack_top=0x%X\n",
+        t->task_id, t->priority, t->cap_mask, t->domain, t->kernel_stack_top);
     return 0;
 }

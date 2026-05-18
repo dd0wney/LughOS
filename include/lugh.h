@@ -62,14 +62,25 @@ typedef enum {
 
 /* Task structure for scheduler.
  * cap_mask + domain are bound at create_task() and immutable thereafter,
- * making the task the root of trust for any channel it owns. */
+ * making the task the root of trust for any channel it owns.
+ *
+ * kernel_stack_top is the top (high address) of the per-task kernel-mode
+ * stack reserved in kernel/sched/task.c (Phase 3 A2). Phase 3 A4 uses
+ * this as the save/restore anchor for context switches.
+ *
+ * Layout note (Phase 3 A2): struct size grew from 32 bytes to 40 bytes.
+ * Round-robin serialisation through scheduler_ops.get_state was narrowed
+ * in A1 to just the cursor, so the size bump is not load-bearing for
+ * any persisted state today. */
 typedef struct {
-    uint32_t task_id;  /* unique non-zero id; 0 reserved for "no task" */
-    int priority;      /* 0 (highest) to 10 (lowest) */
-    uint32_t cap_mask; /* CAP_* bitmask; see include/capabilities.h */
-    uint32_t domain;   /* security domain — IPC cross-domain rules apply */
-    uint64_t state;    /* TASK_READY, TASK_RUNNING, TASK_BLOCKED, TASK_TERMINATED */
-    uint64_t deadline; /* For future real-time scheduling */
+    uint32_t task_id;          /* unique non-zero id; 0 reserved for "no task" */
+    int priority;              /* 0 (highest) to 10 (lowest) */
+    uint32_t cap_mask;         /* CAP_* bitmask; see include/capabilities.h */
+    uint32_t domain;           /* security domain — IPC cross-domain rules apply */
+    uint64_t state;            /* TASK_READY, TASK_RUNNING, TASK_BLOCKED, TASK_TERMINATED */
+    uint64_t deadline;         /* For future real-time scheduling */
+    uint32_t kernel_stack_top; /* per-task kernel stack TOP (grows down); 0 = no stack */
+    uint32_t _padding1;        /* explicit padding to keep total a multiple of 8 */
 } task_t;
 
 /* Message priorities */
