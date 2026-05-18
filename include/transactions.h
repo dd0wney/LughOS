@@ -4,9 +4,29 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Hot-swappable storage backend interface. Mirrors scheduler_ops_t in
+ * include/lugh.h — every backend is a vtable of named methods so the
+ * kernel can hot-swap implementations under a quiesce-and-resume
+ * protocol. For Phase 3 there is exactly one backend (memory_storage_ops);
+ * the interface exists so the swap path is testable. */
+typedef struct {
+    const char* name;
+    int  (*init)(void* context);
+    int  (*create_checkpoint)(const char* src, const char* dst);
+    int  (*restore_checkpoint)(const char* src, const char* dst);
+    int  (*remove_checkpoint)(const char* checkpoint);
+    int  (*get_state)(void* state_buffer, size_t* size);
+    int  (*set_state)(void* state_buffer, size_t size);
+    int  (*prepare_swap)(void);
+    int  (*finalize_swap)(void);
+} storage_ops_t;
+
+/* Concrete in-memory storage backend. Defined in services/storage/storage.c. */
+extern storage_ops_t memory_storage_ops;
+
 /**
  * Generate a unique transaction ID.
- * 
+ *
  * @return A unique 64-bit transaction identifier
  */
 uint64_t generate_transaction_id(void);
