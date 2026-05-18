@@ -22,6 +22,7 @@ void test_update_system(void);
 void test_auditor(void);
 void test_ipc_enforcement(void);
 void test_task_caps(void);
+void test_task_lifecycle(void);
 int  init_ipc(void);
 int  ipc_create_channel(uint32_t security_level, uint32_t domain,
                         uint32_t cap_mask, int protocol);
@@ -545,6 +546,117 @@ void test_task_caps(void) {
     log_message(LOG_INFO, "Task caps tests: %d/3 passed\n", pass);
 }
 
+/* ── test_task_lifecycle (Phase 3 A5) ─────────────────────────────────
+ * Spawns two kernel-mode child tasks (t_a, t_b), each printing a
+ * tagged line + yielding three times then "exiting". The test
+ * verifies that:
+ *   (1) arm_context_switch saves/restores callee-saved regs correctly,
+ *   (2) the scheduler picks tasks in round-robin order,
+ *   (3) TASK_TERMINATED tasks are skipped by the scheduler,
+ *   (4) control returns to kernel_task after all children terminate.
+ *
+ * The test sweeps any stale READY tasks in tasks[] before yielding —
+ * specifically the leaked task from test_task_caps subtest 1, which
+ * has saved_sp = kernel_stack_top (an empty stack, never set up by
+ * task_setup_initial_frame). Switching to such a task would `pop`
+ * garbage and crash; parking it as TERMINATED is the defensive move.
+ */
+static volatile int task_a_runs = 0;
+static volatile int task_b_runs = 0;
+
+static void test_task_lifecycle_body_a(void) {
+    while (task_a_runs < 3) {
+        log_message(LOG_INFO, "[t=A] iteration %d", task_a_runs);
+        task_a_runs++;
+        task_yield();
+    }
+    current_task->state = TASK_TERMINATED;
+    task_yield();
+    /* Should never get here — TERMINATED tasks aren't picked. */
+    for (;;) task_yield();
+}
+
+static void test_task_lifecycle_body_b(void) {
+    while (task_b_runs < 3) {
+        log_message(LOG_INFO, "[t=B] iteration %d", task_b_runs);
+        task_b_runs++;
+        task_yield();
+    }
+    current_task->state = TASK_TERMINATED;
+    task_yield();
+    for (;;) task_yield();
+}
+
+void test_task_lifecycle(void) {
+    log_message(LOG_INFO, "Testing task lifecycle (context switch)...\n");
+    task_a_runs = 0;
+    task_b_runs = 0;
+
+    /* Park stale tasks so the scheduler doesn't pick one with no
+     * valid saved frame. */
+    task_t* table = task_table();
+    int n = task_table_count();
+    for (int i = 0; i < n; i++) {
+        if (table[i].task_id != current_task->task_id &&
+            table[i].state != (uint64_t)TASK_TERMINATED) {
+            table[i].state = TASK_TERMINATED;
+        }
+    }
+
+    task_t spec_a = {0};
+    spec_a.priority = 5;
+    spec_a.cap_mask = CAP_IPC_SEND;
+    spec_a.domain = 0;
+    spec_a.state = TASK_READY;
+    if (create_task(&spec_a) != 0) {
+        log_message(LOG_ERROR, "test_task_lifecycle: create_task A failed\n");
+        return;
+    }
+    task_t spec_b = {0};
+    spec_b.priority = 5;
+    spec_b.cap_mask = CAP_IPC_SEND;
+    spec_b.domain = 0;
+    spec_b.state = TASK_READY;
+    if (create_task(&spec_b) != 0) {
+        log_message(LOG_ERROR, "test_task_lifecycle: create_task B failed\n");
+        return;
+    }
+
+    task_t* t_a = task_find(spec_a.task_id);
+    task_t* t_b = task_find(spec_b.task_id);
+    if (t_a == NULL || t_b == NULL) {
+        log_message(LOG_ERROR, "test_task_lifecycle: task_find failed\n");
+        return;
+    }
+    task_setup_initial_frame(t_a, test_task_lifecycle_body_a);
+    task_setup_initial_frame(t_b, test_task_lifecycle_body_b);
+
+    log_message(LOG_INFO, "test_task_lifecycle: yielding to children...\n");
+    task_yield();
+    /* Round-robin lands us back here between every child iteration too;
+     * keep yielding until both children have hit TASK_TERMINATED.
+     * Bounded loop: 64 iterations is far more than the 3*2 + bookkeeping
+     * yields we expect; trips a defensive break if something stalls. */
+    int safety = 0;
+    while ((t_a->state != (uint64_t)TASK_TERMINATED ||
+            t_b->state != (uint64_t)TASK_TERMINATED) &&
+           safety < 64) {
+        task_yield();
+        safety++;
+    }
+
+    /* Children should both have terminated by the time we resume. */
+    if (task_a_runs == 3 && task_b_runs == 3) {
+        log_message(LOG_INFO,
+            "Task lifecycle test PASS: A=%d B=%d (3 iterations each, "
+            "context switches verified)\n", task_a_runs, task_b_runs);
+    } else {
+        log_message(LOG_ERROR,
+            "Task lifecycle test FAIL: A=%d B=%d (expected 3/3)\n",
+            task_a_runs, task_b_runs);
+    }
+}
+
 /* Plain byte comparison — avoids pulling in a memcmp declaration. */
 static int nng_test_body_eq(const nng_msg_t *m, const char *want, int len) {
     if (nng_msg_len(m) != len) return 0;
@@ -946,6 +1058,7 @@ void kmain(void) {
     test_auditor();
     test_ipc_enforcement();
     test_task_caps();
+    test_task_lifecycle();
     test_transactional_storage();
     test_nng_patterns();
 

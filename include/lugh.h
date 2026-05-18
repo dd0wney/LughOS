@@ -92,6 +92,14 @@ typedef struct {
 void arm_context_switch(task_t* prev, task_t* next);
 void x86_context_switch(task_t* prev, task_t* next);
 
+/* High-level scheduler helpers (Phase 3 A5). task_yield asks the scheduler
+ * for the next runnable task and switches to it (arch-dispatched). It's
+ * a no-op when the scheduler picks the same task. IRQs are masked across
+ * the switch via splhigh/splx. */
+typedef void (*task_entry_fn)(void);
+void task_setup_initial_frame(task_t* t, task_entry_fn entry);
+void task_yield(void);
+
 /* Message priorities */
 typedef enum {
     PRIORITY_HIGH = 0, /* Critical commands, interrupts, grid alerts */

@@ -1,5 +1,8 @@
 #include "lugh.h"
 #include "capabilities.h"
+#include "interrupt.h"
+
+extern scheduler_ops_t rr_scheduler;
 
 /* Static task table per NASA Power of Ten rule 5 (no dynamic allocation
  * after init) and rule 2 (statically determinable upper bound). The
@@ -162,4 +165,63 @@ int create_task(task_t* spec) {
         "Created task id=%u priority=%d caps=0x%X domain=%u stack_top=0x%X\n",
         t->task_id, t->priority, t->cap_mask, t->domain, t->kernel_stack_top);
     return 0;
+}
+
+/* ── Phase 3 A5: scheduler helpers ─────────────────────────────────
+ *
+ * task_setup_initial_frame prepares a never-run task so the first
+ * arm_context_switch INTO it lands at the entry function. The frame
+ * matches what arm_context_switch's `pop {r4-r11, lr}` expects to
+ * find: 9 words on the stack (low addr → high) holding r4..r11..lr.
+ * We zero the GPRs and put `entry` at the lr slot, so the matching
+ * `bx lr` at the end of the switch jumps to `entry()`.
+ *
+ * x86 frame would mirror this (push ebp/edi/esi/ebx + ret addr). Both
+ * arches share the same `saved_sp` field; the per-arch shape lives in
+ * context_switch.S. */
+void task_setup_initial_frame(task_t* t, task_entry_fn entry) {
+    if (t == NULL || t->kernel_stack_top == 0u || entry == NULL) return;
+    uint32_t* sp = (uint32_t*)(uintptr_t)t->kernel_stack_top;
+    /* Build the frame in descending order. The ARM switch's
+     * `pop {r4-r11, lr}` loads in ascending register order from
+     * ascending memory addresses, so lr must be at the HIGH end
+     * and r4 at the LOW end. */
+    *--sp = (uint32_t)(uintptr_t)entry; /* lr */
+    *--sp = 0u;                          /* r11 */
+    *--sp = 0u;                          /* r10 */
+    *--sp = 0u;                          /* r9  */
+    *--sp = 0u;                          /* r8  */
+    *--sp = 0u;                          /* r7  */
+    *--sp = 0u;                          /* r6  */
+    *--sp = 0u;                          /* r5  */
+    *--sp = 0u;                          /* r4  */
+    t->saved_sp = (uint32_t)(uintptr_t)sp;
+}
+
+/* Cooperative yield: ask the scheduler for the next runnable task and
+ * switch into it. No-op if the scheduler returns the same task or has
+ * none runnable. IRQs are masked across the switch — current_task,
+ * saved_sp, and the actual register set all move together. */
+void task_yield(void) {
+    if (current_task == NULL || rr_scheduler.schedule == NULL) return;
+    task_t* prev = current_task;
+    uint32_t next_id = 0u;
+    int rv = rr_scheduler.schedule(NULL, 0, &next_id);
+    if (rv != 0) return;
+    if (next_id == prev->task_id) return;
+    task_t* next = task_find(next_id);
+    if (next == NULL) return;
+    if (next->saved_sp == 0u) {
+        log_message(LOG_WARNING,
+            "task_yield: target task %u has no saved frame (saved_sp=0)\n",
+            next->task_id);
+        return;
+    }
+    spl_t old = splhigh();
+#if defined(__arm__)
+    arm_context_switch(prev, next);
+#elif defined(__i386__)
+    x86_context_switch(prev, next);
+#endif
+    splx(old);
 }
