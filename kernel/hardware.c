@@ -1,7 +1,7 @@
 #include "console.h"
 #include "lugh.h"
 #include "hardware.h"
-#include "watchdog.h"
+#include "auditor.h"
 
 extern scheduler_ops_t rr_scheduler;
 
@@ -30,7 +30,7 @@ uint8_t inb(uint16_t port) {
  * If execution ever reaches one of these, an unguarded x86-port caller
  * snuck in — trap loudly rather than silently returning 0, which on a
  * "while (!(inb(LSR) & THR_EMPTY))" loop would spin forever (the failure
- * mode that originally hung the ARM build inside watchdog_tick). */
+ * mode that originally hung the ARM build inside auditor_tick). */
 __attribute__((noreturn))
 void outb(uint16_t port, uint8_t val) {
     (void)port; (void)val;
@@ -74,7 +74,7 @@ int hw_detect(void) {
  * Process any pending system events
  */
 void process_events(void) {
-    watchdog_tick();
+    auditor_tick();
     if (rr_scheduler.schedule) {
         uint32_t next_task_id = 0;
         rr_scheduler.schedule(NULL, 0, &next_task_id);

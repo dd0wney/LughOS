@@ -13,7 +13,7 @@
 #define CAP_PRIVILEGED_OP  (1u << 3)  /* may send OP_UPDATE / OP_WRITE / OP_DELETE */
 #define CAP_ALL             0x0Fu     /* convenience: every capability         */
 
-/* Denial reason codes embedded in watchdog_deny_info_t.reason.
+/* Denial reason codes embedded in auditor_deny_info_t.reason.
  * Values are stable — the JEPA encoder treats them as class labels. */
 #define DENY_CAP_SEND       1u  /* ipc_send: CAP_IPC_SEND missing          */
 #define DENY_CAP_RECV       2u  /* ipc_recv: CAP_IPC_RECV missing          */

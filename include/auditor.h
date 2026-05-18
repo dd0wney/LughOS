@@ -1,16 +1,16 @@
-#ifndef WATCHDOG_H
-#define WATCHDOG_H
+#ifndef AUDITOR_H
+#define AUDITOR_H
 
 #include "lugh.h"
 #include "ring_buffer.h"
 
-#define WATCHDOG_MAGIC             0x4C474849UL  /* "LGHI" = LughOS IPC */
-#define WATCHDOG_TELEMETRY_VERSION 1u
+#define AUDITOR_MAGIC             0x4C474849UL  /* "LGHI" = LughOS IPC */
+#define AUDITOR_TELEMETRY_VERSION 1u
 
-#define WATCHDOG_REC_MSG       0u  /* normal IPC message event  */
-#define WATCHDOG_REC_OVERFLOW  1u  /* ring dropped N messages   */
-#define WATCHDOG_REC_HEARTBEAT 2u  /* 1-second keepalive        */
-#define WATCHDOG_REC_DENY      3u  /* capability/domain denied  */
+#define AUDITOR_REC_MSG       0u  /* normal IPC message event  */
+#define AUDITOR_REC_OVERFLOW  1u  /* ring dropped N messages   */
+#define AUDITOR_REC_HEARTBEAT 2u  /* 1-second keepalive        */
+#define AUDITOR_REC_DENY      3u  /* capability/domain denied  */
 
 /* Fixed-size telemetry record emitted on COM2.
  * 44 bytes packed. Python struct format: '<IHHQBBBBII16s'
@@ -25,9 +25,9 @@
  *              [8..11]=dst_channel_id (0xFFFFFFFF if none), [12..15]=zeros
  */
 typedef struct __attribute__((packed)) {
-    uint32_t magic;           /* WATCHDOG_MAGIC                       */
-    uint16_t version;         /* WATCHDOG_TELEMETRY_VERSION           */
-    uint16_t record_type;     /* WATCHDOG_REC_*                       */
+    uint32_t magic;           /* AUDITOR_MAGIC                        */
+    uint16_t version;         /* AUDITOR_TELEMETRY_VERSION            */
+    uint16_t record_type;     /* AUDITOR_REC_*                        */
     uint64_t jiffies;         /* hw_get_jiffies() at emit time        */
     uint8_t  priority;        /* msg.priority (MSG/DENY) or 0         */
     uint8_t  src_domain;      /* channels[ch].domain, low 8 bits      */
@@ -36,9 +36,9 @@ typedef struct __attribute__((packed)) {
     uint32_t operation;       /* msg.operation or drop count          */
     uint32_t checksum;        /* msg.checksum (MSG) or deny context   */
     uint8_t  payload_hash[16];/* 4×FNV-1a-32 (MSG) or cap diag (DENY)*/
-} watchdog_record_t;          /* sizeof = 44 bytes, fixed              */
+} auditor_record_t;           /* sizeof = 44 bytes, fixed              */
 
-/* Context passed to watchdog_deny() — assembled by ipc.c from channel table. */
+/* Context passed to auditor_deny() — assembled by ipc.c from channel table. */
 typedef struct {
     uint8_t  src_domain;
     uint8_t  dst_domain;      /* 0xFF if no destination channel */
@@ -51,14 +51,14 @@ typedef struct {
     uint32_t operation;
     uint32_t granted_caps;
     uint32_t required_caps;
-} watchdog_deny_info_t;
+} auditor_deny_info_t;
 
-/* Exported globals — defined in services/watchdog/exporter.c */
+/* Exported globals — defined in services/auditor/exporter.c */
 extern ipc_ring_t        ipc_ring;
-extern volatile uint8_t  watchdog_enabled;
+extern volatile uint8_t  auditor_enabled;
 
-void watchdog_init(void);
-void watchdog_tick(void);
-void watchdog_deny(const watchdog_deny_info_t *info);
+void auditor_init(void);
+void auditor_tick(void);
+void auditor_deny(const auditor_deny_info_t *info);
 
-#endif /* WATCHDOG_H */
+#endif /* AUDITOR_H */

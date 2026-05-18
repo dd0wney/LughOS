@@ -22,7 +22,7 @@ static uint32_t allocate_task_id(void) {
 }
 
 void task_init(void) {
-    /* Boot the root task: CAP_ALL in domain 0. Bootstrap IPC (watchdog,
+    /* Boot the root task: CAP_ALL in domain 0. Bootstrap IPC (auditor,
      * scheduler channels) runs under this identity. */
     kernel_task.task_id  = allocate_task_id();
     kernel_task.priority = 0;

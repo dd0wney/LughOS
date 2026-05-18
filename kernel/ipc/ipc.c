@@ -2,7 +2,7 @@
 #include "nngcompat.h"
 #include "security.h"
 #include "crypto.h"
-#include "watchdog.h"
+#include "auditor.h"
 #include "capabilities.h"
 
 #define MAX_IPC_CHANNELS 16
@@ -19,16 +19,16 @@ typedef struct {
 
 static ipc_channel_t channels[MAX_IPC_CHANNELS];
 
-/* ── Internal: fill deny info and emit via watchdog ─────────────── */
+/* ── Internal: fill deny info and emit via auditor ──────────────── */
 
 /* Create-time denial (no channel exists yet): src_channel/dst_channel
  * are 0xFF, operation is 0, src_domain comes from the calling task.
  * Kept separate from emit_deny() because that one indexes channels[]. */
 static void emit_create_deny(uint32_t requested_caps, uint32_t target_domain,
                              uint8_t reason, int protocol) {
-    if (!watchdog_enabled || current_task == NULL)
+    if (!auditor_enabled || current_task == NULL)
         return;
-    watchdog_deny_info_t d;
+    auditor_deny_info_t d;
     d.src_domain    = (uint8_t)(current_task->domain & 0xFFu);
     d.dst_domain    = (uint8_t)(target_domain & 0xFFu);
     d.src_channel   = 0xFFu;
@@ -40,14 +40,14 @@ static void emit_create_deny(uint32_t requested_caps, uint32_t target_domain,
     d.operation     = 0u;
     d.granted_caps  = current_task->cap_mask;
     d.required_caps = requested_caps;
-    watchdog_deny(&d);
+    auditor_deny(&d);
 }
 
 static void emit_deny(int src_id, int dst_id,
                       uint32_t op, uint8_t reason, uint8_t priority) {
-    if (!watchdog_enabled)
+    if (!auditor_enabled)
         return;
-    watchdog_deny_info_t d;
+    auditor_deny_info_t d;
     d.src_domain   = (uint8_t)(channels[src_id].domain & 0xFFu);
     d.dst_domain   = (dst_id >= 0 && dst_id < MAX_IPC_CHANNELS)
                          ? (uint8_t)(channels[dst_id].domain & 0xFFu)
@@ -63,7 +63,7 @@ static void emit_deny(int src_id, int dst_id,
     d.operation    = op;
     d.granted_caps = channels[src_id].cap_mask;
     d.required_caps = required_caps_for_op(op);
-    watchdog_deny(&d);
+    auditor_deny(&d);
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -222,9 +222,9 @@ int ipc_send(int channel_id, message_t *msg) {
         return -3;
     }
 
-    /* Stamp channel context into _padding1 so the watchdog record carries
+    /* Stamp channel context into _padding1 so the auditor record carries
      * source identity (who/where/how) without resizing message_t. */
-    if (watchdog_enabled) {
+    if (auditor_enabled) {
         msg->_padding1 = ((uint32_t)(channel_id & 0xFF))
                        | ((uint32_t)(channels[channel_id].domain & 0xFF) << 8)
                        | ((uint32_t)(channels[channel_id].socket.protocol & 0xFF) << 16);

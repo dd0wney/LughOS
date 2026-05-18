@@ -5,7 +5,7 @@
 #include "nngcompat.h"
 #include "console.h"
 #include "crypto.h"
-#include "watchdog.h"
+#include "auditor.h"
 #include "capabilities.h"
 #include "transactions.h"
 #include "update.h"
@@ -18,7 +18,7 @@ void test_nng(void);
 void test_nng_patterns(void);
 void test_energy_grid_alert(void);
 void test_update_system(void);
-void test_watchdog(void);
+void test_auditor(void);
 void test_ipc_enforcement(void);
 void test_task_caps(void);
 int  init_ipc(void);
@@ -236,11 +236,11 @@ void test_update_system(void) {
     }
 }
 
-void test_watchdog(void) {
-    log_message(LOG_INFO, "Testing watchdog telemetry path...\n");
+void test_auditor(void) {
+    log_message(LOG_INFO, "Testing auditor telemetry path...\n");
     int ch = ipc_create_channel(0, 0, CAP_ALL, NNG_PROTO_PUB0);
     if (ch < 0) {
-        log_message(LOG_ERROR, "Watchdog test: failed to create IPC channel\n");
+        log_message(LOG_ERROR, "Auditor test: failed to create IPC channel\n");
         return;
     }
     message_t msg;
@@ -249,10 +249,10 @@ void test_watchdog(void) {
     msg.checksum  = 0;
     msg._padding1 = 0;
     memset(msg.payload, 0, MAX_MSG_SIZE);
-    memcpy(msg.payload, "watchdog-test", 13);
+    memcpy(msg.payload, "auditor-test", 13);
     ipc_send(ch, &msg);          /* triggers ring_push */
-    watchdog_tick();              /* drains ring → emits telemetry record on COM2 */
-    log_message(LOG_INFO, "Watchdog test: record emitted (check /tmp/lugh_ipc.bin)\n");
+    auditor_tick();              /* drains ring → emits telemetry record on COM2 */
+    log_message(LOG_INFO, "Auditor test: record emitted (check /tmp/lugh_ipc.bin)\n");
     ipc_close_channel(ch);
 }
 
@@ -284,7 +284,7 @@ void test_ipc_enforcement(void) {
             log_message(LOG_ERROR,
                 "Enforcement test 1 FAIL: expected -7, got %d\n", rv);
         }
-        watchdog_tick();  /* drain DENY record to COM2 */
+        auditor_tick();  /* drain DENY record to COM2 */
         ipc_close_channel(ch);
     }
 
@@ -311,7 +311,7 @@ void test_ipc_enforcement(void) {
             log_message(LOG_ERROR,
                 "Enforcement test 2 FAIL: expected -7, got %d\n", rv);
         }
-        watchdog_tick();
+        auditor_tick();
         ipc_close_channel(ch);
     }
 
@@ -336,7 +336,7 @@ void test_ipc_enforcement(void) {
                 "Enforcement test 3 FAIL: expected NNG_EACCESS (%d), got %d\n",
                 NNG_EACCESS, rv);
         }
-        watchdog_tick();
+        auditor_tick();
         ipc_close_channel(ch_a);
         ipc_close_channel(ch_b);
     }
@@ -669,9 +669,9 @@ void kmain(void) {
     // current_task->cap_mask, so it must point to a real task by this point.
     task_init();
 
-    // Initialize IPC subsystem (includes NNG init) and arm watchdog ring
+    // Initialize IPC subsystem (includes NNG init) and arm auditor ring
     init_ipc();
-    watchdog_init();
+    auditor_init();
 
     // Initialize scheduler
     rr_scheduler.init(NULL);
@@ -679,7 +679,7 @@ void kmain(void) {
     // Run NNG tests
     test_nng();
     test_energy_grid_alert();
-    test_watchdog();
+    test_auditor();
     test_ipc_enforcement();
     test_task_caps();
     test_nng_patterns();

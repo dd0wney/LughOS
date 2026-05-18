@@ -1,5 +1,5 @@
 #include "lugh.h"
-#include "watchdog.h"
+#include "auditor.h"
 #include "hardware.h"
 #include "interrupt.h"
 
@@ -11,7 +11,7 @@
 #define DRAIN_BATCH 32u
 
 ipc_ring_t       ipc_ring;
-volatile uint8_t watchdog_enabled = 0;
+volatile uint8_t auditor_enabled = 0;
 
 static uint64_t tick_count       = 0;
 static uint32_t heartbeat_counter = 0;
@@ -75,9 +75,9 @@ static void payload_fingerprint(const char *payload, uint8_t out[16]) {
 
 /* ── Shared record header init ───────────────────────────────────── */
 
-static void init_record(watchdog_record_t *rec, uint16_t type) {
-    rec->magic       = WATCHDOG_MAGIC;
-    rec->version     = WATCHDOG_TELEMETRY_VERSION;
+static void init_record(auditor_record_t *rec, uint16_t type) {
+    rec->magic       = AUDITOR_MAGIC;
+    rec->version     = AUDITOR_TELEMETRY_VERSION;
     rec->record_type = type;
     rec->jiffies     = hw_get_jiffies();
 }
@@ -87,8 +87,8 @@ static void init_record(watchdog_record_t *rec, uint16_t type) {
 /* msg._padding1 was stamped in ipc_send with [channel_id:8][domain:8][protocol:8][0:8].
  * Unpack it here so MSG records carry source identity without resizing message_t. */
 static void emit_msg_record(const message_t *msg) {
-    watchdog_record_t rec;
-    init_record(&rec, WATCHDOG_REC_MSG);
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_MSG);
     rec.priority    = (uint8_t)msg->priority;
     rec.channel_id  = (uint8_t)( msg->_padding1        & 0xFFu);
     rec.src_domain  = (uint8_t)((msg->_padding1 >>  8) & 0xFFu);
@@ -100,8 +100,8 @@ static void emit_msg_record(const message_t *msg) {
 }
 
 static void emit_overflow_record(uint32_t dropped) {
-    watchdog_record_t rec;
-    init_record(&rec, WATCHDOG_REC_OVERFLOW);
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_OVERFLOW);
     rec.priority   = 0;
     rec.src_domain = 0;
     rec.protocol   = 0;
@@ -114,8 +114,8 @@ static void emit_overflow_record(uint32_t dropped) {
 }
 
 static void emit_heartbeat_record(void) {
-    watchdog_record_t rec;
-    init_record(&rec, WATCHDOG_REC_HEARTBEAT);
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_HEARTBEAT);
     rec.priority   = 0;
     rec.src_domain = 0;
     rec.protocol   = 0;
@@ -129,12 +129,12 @@ static void emit_heartbeat_record(void) {
 
 /* ── DENY record emission ────────────────────────────────────────── */
 
-void watchdog_deny(const watchdog_deny_info_t *info) {
-    if (!watchdog_enabled || !info)
+void auditor_deny(const auditor_deny_info_t *info) {
+    if (!auditor_enabled || !info)
         return;
 
-    watchdog_record_t rec;
-    init_record(&rec, WATCHDOG_REC_DENY);
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_DENY);
 
     rec.priority   = info->priority;
     rec.src_domain = info->src_domain;
@@ -169,18 +169,18 @@ void watchdog_deny(const watchdog_deny_info_t *info) {
 
 /* ── Service entry points ────────────────────────────────────────── */
 
-void watchdog_init(void) {
+void auditor_init(void) {
     ring_init(&ipc_ring);
     com2_init();
-    watchdog_enabled = 1;
+    auditor_enabled = 1;
     log_message(LOG_INFO,
-        "Watchdog: armed (ring capacity=%u, record_size=%u)\n",
+        "Auditor: armed (ring capacity=%u, record_size=%u)\n",
         IPC_RING_CAPACITY,
-        (unsigned int)sizeof(watchdog_record_t));
+        (unsigned int)sizeof(auditor_record_t));
 }
 
-void watchdog_tick(void) {
-    if (!watchdog_enabled)
+void auditor_tick(void) {
+    if (!auditor_enabled)
         return;
 
     if (ipc_ring.overflow > 0) {

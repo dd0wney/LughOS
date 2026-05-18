@@ -8,7 +8,7 @@
 
 typedef struct {
     volatile uint32_t head;     /* next write slot — ipc_send path   */
-    volatile uint32_t tail;     /* next read slot  — watchdog_tick   */
+    volatile uint32_t tail;     /* next read slot  — auditor_tick   */
     uint32_t          overflow; /* dropped messages since last drain  */
     message_t         buf[IPC_RING_CAPACITY];
 } ipc_ring_t;

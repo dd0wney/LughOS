@@ -2,7 +2,7 @@
 """
 LughOS IPC telemetry reader.
 
-Reads 44-byte watchdog_record_t records written by the LughOS watchdog
+Reads 44-byte auditor_record_t records written by the LughOS auditor
 service on COM2 and prints a human-readable stream.
 
 Usage:
@@ -32,7 +32,7 @@ import struct
 import sys
 import time
 
-# Must match watchdog_record_t in include/watchdog.h
+# Must match auditor_record_t in include/auditor.h
 MAGIC       = 0x4C474849  # "LGHI"
 RECORD_FMT  = "<IHHQBBBBII16s"
 RECORD_SIZE = struct.calcsize(RECORD_FMT)
