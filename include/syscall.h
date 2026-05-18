@@ -2,9 +2,11 @@
 #define LUGHOS_SYSCALL_H
 
 /* System call numbers */
-#define SYS_WRITE    1    /* Write to console */
-#define SYS_IPC_SEND 2    /* Send IPC message */
-#define SYS_EXIT     3    /* Exit program */
+#define SYS_WRITE       1    /* Write to console                              */
+#define SYS_IPC_SEND    2    /* Send IPC message                              */
+#define SYS_EXIT        3    /* Terminate current task                        */
+#define SYS_CREATE_TASK 4    /* Spawn a new task; arg1 = user VA of task_t    */
+#define SYS_YIELD       5    /* Voluntary deschedule; returns when resumed    */
 
 /* Only for kernel use */
 #if defined(__KERNEL__) || defined(__riscv)
