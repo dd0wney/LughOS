@@ -61,11 +61,13 @@ void task_init(void) {
     /* kernel_task is already running on the boot SVC stack; it has no
      * saved context until something switches *away* from it. */
     kt->saved_sp         = 0u;
+    /* Root of the lineage tree — every other task has a real parent. */
+    kt->parent_task_id   = TASK_PARENT_NONE;
     task_count = 1u;
     current_task = kt;
     log_message(LOG_INFO,
-        "Task subsystem: kernel_task ready (id=%u, caps=0x%X, domain=%u, stack_top=0x%X)\n",
-        kt->task_id, kt->cap_mask, kt->domain, kt->kernel_stack_top);
+        "Task subsystem: kernel_task ready (id=%u, caps=0x%X, domain=%u, stack_top=0x%X, parent=0x%X)\n",
+        kt->task_id, kt->cap_mask, kt->domain, kt->kernel_stack_top, kt->parent_task_id);
 }
 
 /* ── Public accessors for the unified task table ──────────────────
@@ -143,6 +145,11 @@ int create_task(task_t* spec) {
      * point". Real preemption (A4) sets saved_sp to wherever the
      * callee-saved frame ended up on the stack. */
     t->saved_sp         = t->kernel_stack_top;
+    /* Lineage: every task created via this path has a parent (the
+     * caller of create_task). The kernel root task in task_init()
+     * is the only TASK_PARENT_NONE; everyone else points back into
+     * the tasks[] table by id. */
+    t->parent_task_id   = current_task->task_id;
 
     if (t->kernel_stack_top == 0u) {
         log_message(LOG_WARNING,
@@ -157,9 +164,11 @@ int create_task(task_t* spec) {
     spec->cap_mask         = t->cap_mask;
     spec->state            = t->state;
     spec->kernel_stack_top = t->kernel_stack_top;
+    spec->parent_task_id   = t->parent_task_id;
 
     log_message(LOG_INFO,
-        "Created task id=%u priority=%d caps=0x%X domain=%u stack_top=0x%X\n",
-        t->task_id, t->priority, t->cap_mask, t->domain, t->kernel_stack_top);
+        "Created task id=%u priority=%d caps=0x%X domain=%u stack_top=0x%X parent=%u\n",
+        t->task_id, t->priority, t->cap_mask, t->domain, t->kernel_stack_top,
+        t->parent_task_id);
     return 0;
 }
