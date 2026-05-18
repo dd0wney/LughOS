@@ -107,14 +107,23 @@ typedef struct {
     int (*finalize_swap)(void);
 } scheduler_ops_t;
 
-/* Transaction log entry for updates */
+/* Transaction log entry for updates.
+ *
+ * task_id records the owning task at txn-emit time so the JEPA encoder
+ * can reconstruct cross-task causality without consulting the scheduler
+ * (the auditor stream is the JEPA's only input). 0 = "no task" — same
+ * sentinel as task_t.task_id.
+ *
+ * Layout (344 bytes, 8-byte aligned): txn_id, task_id, operation,
+ * key[64], value[256], checksum. No trailing pad needed — the field
+ * sequence already lands on an 8-byte boundary. */
 typedef struct {
     uint64_t txn_id;
+    uint32_t task_id;         /* current_task->task_id at emit, or 0 */
+    int operation;            /* OP_WRITE, OP_DELETE, etc. */
     char key[64];             /* Always terminated with '\0' per CERT STR31-C */
     char value[256];          /* Always terminated with '\0' per CERT STR31-C */
-    int operation;            /* OP_WRITE, OP_DELETE, etc. */
     uint32_t checksum;        /* Integrity check per NASA Power of Ten rule 6 */
-    uint8_t _padding[4];      /* Explicit padding per CERT DCL39-C to ensure 8-byte alignment */
 } txn_log_entry_t;
 
 /* Memory safety functions */
