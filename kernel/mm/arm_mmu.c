@@ -56,8 +56,19 @@
  *
  * Result: 0x00C02 base for each section, OR'd with the PA. */
 
-#define SECTION_DESCRIPTOR(addr) \
-    (((addr) & 0xFFF00000u) | (3u << 10) | (0u << 5) | 0x2u)
+/* AP encodings (ARMv5, with SCTLR.S = SCTLR.R = 0):
+ *   0b00  no access (always faults)
+ *   0b01  privileged RW, user no access  — kernel sections
+ *   0b10  privileged RW, user RO         — read-only user data
+ *   0b11  privileged RW, user RW         — user code/data/stack
+ * Combined with DACR=Client per domain, these bits are enforced by
+ * the MMU. With DACR=Manager (B3), they were bypassed. */
+#define AP_KERNEL_ONLY  1u
+#define AP_USER_RO      2u
+#define AP_USER_RW      3u
+
+#define SECTION_DESCRIPTOR(addr, ap) \
+    (((addr) & 0xFFF00000u) | ((ap) << 10) | (0u << 5) | 0x2u)
 
 /* 4096 entries × 4 bytes = 16 KB. Alignment must match TTBR0's
  * 16 KB requirement on ARMv5. Lives in BSS, zero-initialised. */
@@ -107,6 +118,33 @@ static inline void sctlr_write(uint32_t v) {
 
 #endif /* __arm__ */
 
+/* TLB invalidate — call after any L1 table mutation so the CPU
+ * doesn't keep using a stale translation. ARMv5's "invalidate all
+ * TLB" is the simplest hammer; per-VA invalidation (`c8,c7,1`) is
+ * a B4 optimization not yet worth its cost. */
+#ifdef __arm__
+void arm_tlb_invalidate_all(void) {
+    uint32_t zero = 0u;
+    __asm__ volatile("mcr p15, 0, %0, c8, c7, 0" : : "r"(zero) : "memory");
+}
+
+/* Change the AP bits of a single 1 MB section. Used by map_user_space()
+ * below to flip a section between kernel-only and user-RW (or vice
+ * versa) — the only granularity available without L2 page tables.
+ * Returns 0 on success, -1 on out-of-range VA. */
+int arm_section_set_ap(uint32_t va, uint32_t ap) {
+    uint32_t idx = va >> 20;
+    if (idx >= 4096u) return -1;
+    if (l1_page_table[idx] == 0u) return -1;        /* not mapped */
+    if ((l1_page_table[idx] & 0x3u) != 0x2u) return -1;  /* not a section */
+    /* Preserve base + C/B/Domain/IMP bits; replace AP. */
+    l1_page_table[idx] =
+        (l1_page_table[idx] & ~(0x3u << 10)) | ((ap & 0x3u) << 10);
+    arm_tlb_invalidate_all();
+    return 0;
+}
+#endif /* __arm__ */
+
 void arm_mmu_init(void) {
 #ifdef __arm__
     /* 1. Build the L1 page table. */
@@ -114,21 +152,33 @@ void arm_mmu_init(void) {
     for (i = 0u; i < 4096u; i++) {
         l1_page_table[i] = 0u;
     }
-    /* Map low 8 MB (kernel + stacks + frame pool + user load area). */
-    for (i = 0u; i < 8u; i++) {
-        l1_page_table[i] = SECTION_DESCRIPTOR(i * 0x100000u);
+    /* Sections 0–3 ([0x000000–0x400000)): kernel image, BSS, per-mode
+     * stacks, frame allocator pool. Kernel-only — user mode faults. */
+    for (i = 0u; i < 4u; i++) {
+        l1_page_table[i] = SECTION_DESCRIPTOR(i * 0x100000u, AP_KERNEL_ONLY);
+    }
+    /* Sections 4–7 ([0x400000–0x800000)): user binary load area
+     * (0x400000) and user stack (0x700000 grows down through 0x600000).
+     * User RW so syscall return + user execution work. The frame pool
+     * tail (0x500000–0x600000) physically overlaps user space, but no
+     * frame is currently allocated there — Phase 4 will repartition. */
+    for (i = 4u; i < 8u; i++) {
+        l1_page_table[i] = SECTION_DESCRIPTOR(i * 0x100000u, AP_USER_RW);
     }
     /* Map device window 0x10100000–0x101FFFFF (one section covers
-     * VIC, SP804, PL011 UART0, PL011 UART1). */
-    l1_page_table[0x101] = SECTION_DESCRIPTOR(0x10100000u);
+     * VIC, SP804, PL011 UART0, PL011 UART1). Kernel-only. */
+    l1_page_table[0x101] = SECTION_DESCRIPTOR(0x10100000u, AP_KERNEL_ONLY);
 
     /* 2. Set TTBR0 first — before MMU is enabled, the CPU mustn't see
      * a stale base register. */
     mmu_set_ttbr0(l1_page_table);
 
-    /* 3. DACR: all 16 domains in Manager mode. AP bits bypassed; the
-     * only protection is "is this section mapped?". B4 narrows this. */
-    mmu_set_dacr(0xFFFFFFFFu);
+    /* 3. DACR: all 16 domains in Client mode. AP bits ENFORCED.
+     * Kernel sections (AP=01) trap on user access; user sections
+     * (AP=11) trap if anything (no domain) is "No access". B3 used
+     * Manager mode (0xFFFFFFFF, AP bypassed) — B4's switch to Client
+     * mode is what makes user/kernel separation actually load-bearing. */
+    mmu_set_dacr(0x55555555u);
 
     /* 4. Flush stale TLB entries and any cache lines left from boot
      * (caches were never enabled, but be defensive). */
@@ -149,8 +199,8 @@ void arm_mmu_init(void) {
      * before, but unmapped accesses now fault into arm_dabort_panic
      * or arm_pabort_panic (boot_arm.S vector → exceptions.S). */
     log_message(LOG_INFO,
-        "ARM MMU enabled: TTBR0=0x%X DACR=0xFFFFFFFF SCTLR.M=1 "
-        "(9 sections identity-mapped, caches off)\n",
+        "ARM MMU enabled: TTBR0=0x%X DACR=0x55555555 SCTLR.M=1 "
+        "(kernel sections 0-3+0x101 AP=01, user sections 4-7 AP=11)\n",
         (uint32_t)(uintptr_t)l1_page_table);
 #else
     /* On non-ARM builds this is a no-op — the symbol exists so kmain
@@ -159,3 +209,10 @@ void arm_mmu_init(void) {
     log_message(LOG_DEBUG, "arm_mmu_init: not ARM, skipping\n");
 #endif
 }
+
+#ifndef __arm__
+/* Non-ARM stubs for the B4 helpers so memory.h's declarations can be
+ * called unconditionally from arch-neutral code. */
+int  arm_section_set_ap(uint32_t va, uint32_t ap) { (void)va; (void)ap; return 0; }
+void arm_tlb_invalidate_all(void) { }
+#endif

@@ -86,4 +86,22 @@ uint32_t frame_count_free(void);
  * diagnosed without JTAG. On non-ARM builds it's a no-op stub. */
 void arm_mmu_init(void);
 
+/* ── User/kernel separation enforcement (Phase 3 B4) ──────────────
+ *
+ * After arm_mmu_init: sections 0–3 + 0x101 are AP=01 (kernel-only),
+ * sections 4–7 are AP=11 (user RW). DACR=Client makes the CPU
+ * enforce these. User mode accessing a kernel section now takes a
+ * data abort instead of silently succeeding — B6's test exercises
+ * this end to end.
+ *
+ * arm_section_set_ap flips a single 1 MB section's AP bits; useful
+ * to toggle a region between user and kernel accessibility (the only
+ * granularity available without L2 page tables, which are Phase 4).
+ * Returns 0 / -1. TLB is invalidated automatically.
+ *
+ * arm_tlb_invalidate_all flushes the entire TLB — call after L1
+ * mutations done by paths other than arm_section_set_ap. */
+int  arm_section_set_ap(uint32_t va, uint32_t ap);
+void arm_tlb_invalidate_all(void);
+
 #endif /* MEMORY_H */
