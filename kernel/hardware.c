@@ -22,18 +22,25 @@ uint8_t inb(uint16_t port) {
     return ret;
 }
 #else
-// On non-x86 architectures, these are not supported directly.
-// For RISC-V and ARM, we'll use a memory-mapped approach implemented
-// in the architecture-specific console files.
+/* Non-x86 has no port-I/O instruction; all device access is memory-mapped
+ * and routed through arch-specific MMIO in log.c / console.c / exporter.c.
+ * These stubs exist only so the linker can resolve cross-arch references
+ * that are guarded by `#ifdef __i386__` at every actual call site.
+ *
+ * If execution ever reaches one of these, an unguarded x86-port caller
+ * snuck in — trap loudly rather than silently returning 0, which on a
+ * "while (!(inb(LSR) & THR_EMPTY))" loop would spin forever (the failure
+ * mode that originally hung the ARM build inside watchdog_tick). */
+__attribute__((noreturn))
 void outb(uint16_t port, uint8_t val) {
     (void)port; (void)val;
-    // These are implemented architecture-specifically
+    __builtin_trap();
 }
 
+__attribute__((noreturn))
 uint8_t inb(uint16_t port) {
     (void)port;
-    // These are implemented architecture-specifically
-    return 0;
+    __builtin_trap();
 }
 #endif
 
