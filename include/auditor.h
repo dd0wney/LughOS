@@ -23,6 +23,14 @@
 #define AUDITOR_REC_CHAN_CONNECT 6u  /* IPC channel connected     */
 #define AUDITOR_REC_TASK_EXIT    7u  /* task terminated via SYS_EXIT */
 #define AUDITOR_REC_DOMAIN_EDGE  8u  /* domain matrix mutation    */
+#define AUDITOR_REC_FAULT        9u  /* ARM abort (prefetch/data) */
+
+/* Fault subtypes — packed into the wire record's `protocol` byte.
+ * The DFSR W-bit (bit 11) is decoded at the call site so Python
+ * decoders need no ARM-specific bit manipulation. */
+#define AUDITOR_FAULT_PABORT        0u  /* prefetch abort             */
+#define AUDITOR_FAULT_DABORT_READ   1u  /* data abort, read access    */
+#define AUDITOR_FAULT_DABORT_WRITE  2u  /* data abort, write access   */
 
 /* Fixed-size telemetry record emitted on COM2.
  * 44 bytes packed. Python struct format: '<IHHQBBBBII16s'
@@ -80,6 +88,21 @@
  *                Emitted by every successful domain_edge_set so the
  *                JEPA encoder sees policy mutations as first-class
  *                events.
+ *   FAULT:       priority=0, src_domain=task.domain & 0xFF (0 = no current_task),
+ *                protocol=fault_subtype (AUDITOR_FAULT_PABORT/DABORT_READ/DABORT_WRITE),
+ *                channel_id=0,
+ *                operation=fault_pc (faulting instruction VA),
+ *                checksum=dfar (Data Fault Address; 0 for prefetch),
+ *                payload_hash[0..3]=dfsr (Data Fault Status; 0 for prefetch),
+ *                payload_hash[4..7]=spsr (pre-fault CPSR snapshot),
+ *                payload_hash[8..11]=task_id (0 if no current_task),
+ *                payload_hash[12..15]=zeros.
+ *                Emitted synchronously (no ring) from arm_pabort_diagnose /
+ *                arm_dabort_diagnose so the record lands before the panic
+ *                busy-loop. Accesses current_task directly (declared extern
+ *                in lugh.h) — the abort site does not need to pass task
+ *                context explicitly.
+ *
  *   TASK_EXIT:   priority=0, src_domain=0, protocol=0, channel_id=0,
  *                operation=task_id, checksum=(uint32_t)exit_code,
  *                payload_hash[0..15]=zeros.
@@ -193,5 +216,14 @@ void auditor_task_create(uint32_t task_id,
                          uint32_t kernel_stack_top);
 
 void auditor_task_exit(uint32_t task_id, int exit_code);
+
+/* Fault event — emitted synchronously from ARM abort handlers.
+ * fault_type is one of AUDITOR_FAULT_PABORT / DABORT_READ / DABORT_WRITE.
+ * dfar and dfsr should be 0 for prefetch aborts (no data address). */
+void auditor_fault(uint32_t fault_pc,
+                   uint32_t dfar,
+                   uint32_t dfsr,
+                   uint32_t spsr,
+                   uint8_t  fault_type);
 
 #endif /* AUDITOR_H */

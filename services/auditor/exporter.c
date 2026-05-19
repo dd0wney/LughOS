@@ -379,6 +379,57 @@ static void emit_task_exit_record(uint32_t task_id, int exit_code) {
     tlm_write_bytes(&rec, sizeof(rec));
 }
 
+/* FAULT: synchronous panic-path event. Reads current_task directly
+ * (extern task_t* current_task declared in lugh.h) — the abort handler
+ * does not pass task context explicitly.
+ *
+ * Wire packing (mirrors auditor.h FAULT comment):
+ *   protocol      = fault_type  (AUDITOR_FAULT_PABORT/DABORT_READ/DABORT_WRITE)
+ *   operation     = fault_pc
+ *   checksum      = dfar        (0 for prefetch aborts)
+ *   payload_hash  = [dfsr:32][spsr:32][task_id:32][zeros:32]
+ */
+static void emit_fault_record(uint32_t fault_pc,
+                               uint32_t dfar,
+                               uint32_t dfsr,
+                               uint32_t spsr,
+                               uint8_t  fault_type) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_FAULT);
+    rec.priority   = 0;
+    rec.src_domain = (current_task != NULL)
+                     ? (uint8_t)(current_task->domain & 0xFFu)
+                     : 0u;
+    rec.protocol   = fault_type;
+    rec.channel_id = 0;
+    rec.operation  = fault_pc;
+    rec.checksum   = dfar;
+
+    uint32_t vals[4];
+    vals[0] = dfsr;
+    vals[1] = spsr;
+    vals[2] = (current_task != NULL) ? current_task->task_id : 0u;
+    vals[3] = 0u;
+    uint32_t i;
+    for (i = 0; i < 4u; i++) {
+        rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
+        rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
+        rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
+        rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
+    }
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_fault(uint32_t fault_pc,
+                   uint32_t dfar,
+                   uint32_t dfsr,
+                   uint32_t spsr,
+                   uint8_t  fault_type) {
+    if (!auditor_enabled)
+        return;
+    emit_fault_record(fault_pc, dfar, dfsr, spsr, fault_type);
+}
+
 void auditor_task_exit(uint32_t task_id, int exit_code) {
     if (!auditor_enabled)
         return;

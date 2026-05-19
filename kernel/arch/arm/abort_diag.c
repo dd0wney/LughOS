@@ -39,6 +39,7 @@
  * busy-loop with a graceful task-terminate path. */
 
 #include "lugh.h"
+#include "auditor.h"
 
 void arm_pabort_diagnose(uint32_t fault_pc, uint32_t spsr)
 {
@@ -53,6 +54,7 @@ void arm_pabort_diagnose(uint32_t fault_pc, uint32_t spsr)
     log_message(LOG_FATAL,
         "PABORT: pc=0x%X spsr=0x%X mode=0x%X task=%u\n",
         fault_pc, spsr, mode, current_task_id);
+    auditor_fault(fault_pc, 0u, 0u, spsr, AUDITOR_FAULT_PABORT);
 }
 
 void arm_dabort_diagnose(uint32_t fault_pc, uint32_t dfar,
@@ -70,4 +72,8 @@ void arm_dabort_diagnose(uint32_t fault_pc, uint32_t dfar,
         "spsr=0x%X mode=0x%X task=%u\n",
         fault_pc, dfar, dfsr, status, domain,
         is_write ? "write" : "read", spsr, mode, current_task_id);
+    {
+        uint8_t ft = is_write ? AUDITOR_FAULT_DABORT_WRITE : AUDITOR_FAULT_DABORT_READ;
+        auditor_fault(fault_pc, dfar, dfsr, spsr, ft);
+    }
 }
