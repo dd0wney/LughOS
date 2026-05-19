@@ -279,7 +279,7 @@ void test_fault_telemetry(void) {
     /* Synthetic prefetch abort at a known VA from domain 0 task 1. */
     auditor_fault(0xDEAD0000u, 0u, 0u, 0x00000010u, AUDITOR_FAULT_PABORT);
 
-    /* Synthetic data-write abort: VA=0xBAD00000, DFSR=0xF (permission L1),
+    /* Synthetic data-write abort: VA=0xBAD00000, DFSR=0xF (permission L2),
      * SPSR=0x90 (IRQ disabled, ARM mode, SVC). */
     auditor_fault(0xCAFE0000u, 0xBAD00000u, 0x0000080Fu,
                   0x00000090u, AUDITOR_FAULT_DABORT_WRITE);

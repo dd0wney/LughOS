@@ -48,8 +48,9 @@ arm_pabort_panic:
 @ Data abort — same idea but the fault VA is in DFAR (Data Fault
 @ Address Register, CP15 c6,c0,0) and the status in DFSR (c5,c0,0).
 @ LR_abt for data abort points past the faulting instruction +8 (ARMv5),
-@ so the load-pair format is slightly different. The F3 commit will
-@ replace this stub with a graceful handler; for F2 we just instrument.
+@ so the load-pair format is slightly different. Telemetry emission
+@ (AUDITOR_REC_FAULT) added in Phase 4 F3. A graceful handler is
+@ deferred to a later phase.
 .global arm_dabort_panic
 arm_dabort_panic:
     sub  r0, lr, #8                 @ r0 = faulting instruction VA

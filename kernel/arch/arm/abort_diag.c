@@ -35,8 +35,9 @@
  *
  * After we dump, control returns to the assembly stub which prints
  * "EXC:P\n" / "EXC:D\n" and busy-loops, preserving the existing
- * "panic stops the kernel" semantics. Phase 4 F3 will replace the
- * busy-loop with a graceful task-terminate path. */
+ * "panic stops the kernel" semantics. Telemetry emission (AUDITOR_REC_FAULT)
+ * added in Phase 4 F3. Replacing the busy-loop with a graceful task-terminate
+ * path is deferred to a later phase. */
 
 #include "lugh.h"
 #include "auditor.h"
