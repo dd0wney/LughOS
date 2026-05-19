@@ -25,6 +25,7 @@ void test_task_caps(void);
 void test_task_lifecycle(void);
 void test_frame_allocator(void);
 void test_mmu_protection(void);
+void test_fault_telemetry(void);
 int  init_ipc(void);
 int  ipc_create_channel(uint32_t security_level, uint32_t domain,
                         uint32_t cap_mask, int protocol);
@@ -267,6 +268,24 @@ void test_auditor(void) {
     auditor_tick();              /* drains ring → emits telemetry record on COM2 */
     log_message(LOG_INFO, "Auditor test: record emitted (check /tmp/lugh_ipc.bin)\n");
     ipc_close_channel(ch);
+}
+
+/* Direct call to auditor_fault() — exercises the emit path without
+ * triggering a real hardware abort. The records land on COM2 / UART1
+ * and are verifiable via scripts/validate_telemetry.py. */
+void test_fault_telemetry(void) {
+    log_message(LOG_INFO, "Testing auditor_fault() emit path...\n");
+
+    /* Synthetic prefetch abort at a known VA from domain 0 task 1. */
+    auditor_fault(0xDEAD0000u, 0u, 0u, 0x00000010u, AUDITOR_FAULT_PABORT);
+
+    /* Synthetic data-write abort: VA=0xBAD00000, DFSR=0xF (permission L1),
+     * SPSR=0x90 (IRQ disabled, ARM mode, SVC). */
+    auditor_fault(0xCAFE0000u, 0xBAD00000u, 0x0000080Fu,
+                  0x00000090u, AUDITOR_FAULT_DABORT_WRITE);
+
+    log_message(LOG_INFO,
+        "Fault telemetry test: 2 records emitted (pabort + dabort_write)\n");
 }
 
 /* Test IPC enforcement: 3 subtests covering cap_send, cap_priv, domain checks.
@@ -1236,6 +1255,7 @@ void kmain(void) {
     test_task_lifecycle();
     test_frame_allocator();
     test_mmu_protection();
+    test_fault_telemetry();
     test_transactional_storage();
     test_nng_patterns();
 
