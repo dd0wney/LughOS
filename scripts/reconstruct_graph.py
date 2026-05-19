@@ -47,6 +47,7 @@ REC_CHAN_CREATE  = 5
 REC_CHAN_CONNECT = 6
 REC_TASK_EXIT    = 7
 REC_DOMAIN_EDGE  = 8
+REC_FAULT        = 9  # prefetch/data abort — no-op for graph topology
 
 
 @dataclass
@@ -124,6 +125,12 @@ def apply_record(state: GraphState, rec: dict) -> None:
         src = rec["operation"]
         dst = rec["checksum"]
         state.domain_edges.add((src, dst))
+
+    elif t == REC_FAULT:
+        # F3: fault records annotate task nodes but don't mutate graph topology.
+        # Graph-level fault annotation (e.g. marking a task node "faulted") is
+        # deferred to Phase 5. Explicit branch documents the intent.
+        pass
 
 
 def parse_record(raw: bytes) -> dict:

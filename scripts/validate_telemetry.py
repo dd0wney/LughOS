@@ -54,6 +54,7 @@ REC_TYPE_NAME = {
     6: "CHAN_CONNECT",
     7: "TASK_EXIT",
     8: "DOMAIN_EDGE",
+    9: "FAULT",
 }
 
 # Categories a healthy boot exercises (test_auditor, test_ipc_enforcement,
