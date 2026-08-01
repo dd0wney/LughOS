@@ -58,76 +58,63 @@ static const char *k_strstr(const char *haystack, const char *needle) {
  * - JPL Rule 14: Check return values
  * - NASA Rule 1: Simple control flow
  */
+/* Static staging area. Bounded and zero-initialised in BSS, per NASA
+ * Power of Ten rule 3.
+ *
+ * This replaces two magic addresses, 0x900000 for code and 0xA00000 for
+ * data. Neither was ever mapped. sandbox_apply asked map_user_space to
+ * map them, map_user_space returned 0 without creating any mapping, and
+ * the copy that followed took a section translation fault:
+ *
+ *     DABORT pc=0x000192BC va=0x00900000 dfsr=0x05
+ *
+ * The fault stayed hidden because reaching this function required the
+ * update pipeline to pass its checkpoint step, which it never did.
+ *
+ * The buffer is ordinary kernel memory and nothing branches into it —
+ * see the note on execution below. */
+static uint8_t sandbox_stage[SANDBOX_STAGE_SIZE];
+
 bool sandbox_apply(const uint8_t *image, size_t size) {
     if (image == NULL || size == 0) {
         log_message(LOG_ERROR, "Invalid image for sandbox testing");
         return false;
     }
-    
-    log_message(LOG_INFO, "Applying update in sandbox environment");
-    
-    // Basic validation of the binary format
-    // Check if it's a valid ELF file (assuming ELF format)
-    if (size < 64 || image[0] != 0x7F || image[1] != 'E' || 
+
+    /* Reject rather than truncate. A truncated image would still pass the
+     * ELF check below and report a clean sandbox run for a binary that was
+     * never staged in full. */
+    if (size > sizeof(sandbox_stage)) {
+        log_message(LOG_ERROR,
+            "Image too large to stage: %u bytes, limit is %u",
+            (unsigned int)size, (unsigned int)sizeof(sandbox_stage));
+        return false;
+    }
+
+    log_message(LOG_INFO, "Staging update in sandbox environment");
+
+    /* Basic validation of the binary format before any copy. */
+    if (size < 64 || image[0] != 0x7F || image[1] != 'E' ||
         image[2] != 'L' || image[3] != 'F') {
         log_message(LOG_ERROR, "Invalid binary format in sandbox");
         return false;
     }
-    
-    // Create an isolated memory environment for the update
-    uint32_t* sandbox_page_dir = allocate_page_dir();
-    if (!sandbox_page_dir) {
-        log_message(LOG_ERROR, "Failed to allocate sandbox memory environment");
-        return false;
-    }
-    
-    // Define sandbox memory regions
-    uint32_t sandbox_code_addr = 0x900000;  // Sandbox code region
-    uint32_t sandbox_data_addr = 0xA00000;  // Sandbox data region
-    
-    // Map sandbox memory with restricted permissions
-    // Read + Execute for code section
-    if (map_user_space(sandbox_page_dir, sandbox_code_addr, 
-                      sandbox_code_addr + size, USER_READ | USER_EXEC) != 0) {
-        log_message(LOG_ERROR, "Failed to map sandbox code memory");
-        return false;
-    }
-    
-    // Read + Write for data section
-    if (map_user_space(sandbox_page_dir, sandbox_data_addr, 
-                      sandbox_data_addr + 4096, USER_READ | USER_WRITE) != 0) {
-        log_message(LOG_ERROR, "Failed to map sandbox data memory");
-        return false;
-    }
-    
-    // Copy the binary to sandbox memory
-    // In a real system, this would map to the appropriate physical pages
-#ifdef __riscv
-    // Use uintptr_t for RISC-V (64-bit)
-    k_memcpy((void*)(uintptr_t)sandbox_code_addr, image, size);
-#else
-    // Original 32-bit implementation
-    k_memcpy((void*)sandbox_code_addr, image, size);
-#endif
-    
-    // Execute the binary in the sandbox with restricted permissions
-    log_message(LOG_INFO, "Executing update in sandbox environment");
-    
-    /* In a real system, we would:
-     * 1. Set up runtime monitoring (resource usage, syscall filtering)
-     * 2. Execute the binary with limited privileges
-     * 3. Monitor for crashes, hangs, or unauthorized behavior
-     * 4. Log all activities for audit purposes
-     */
-    
-    // For this demo, we simulate successful sandbox execution
-    log_message(LOG_INFO, "Sandbox execution completed without errors");
-    
-    // Clean up sandbox memory
-    // In a real implementation, we would free the page directory and mapped pages
-    // free_memory(sandbox_page_dir);
-    
-    log_message(LOG_INFO, "Sandbox validation passed");
+
+    k_memcpy(sandbox_stage, image, size);
+
+    /* Execution is NOT implemented, and the code no longer pretends
+     * otherwise. Running an untrusted binary under supervision needs
+     * syscall filtering, resource accounting and a fault boundary that
+     * returns control here — none of which LughOS has yet. Until then
+     * this function stages and format-checks, and the staging buffer
+     * stays kernel-only memory that nothing branches into.
+     *
+     * The previous version logged "Executing update in sandbox
+     * environment" and "Sandbox execution completed without errors"
+     * around a comment saying execution was simulated. */
+    log_message(LOG_INFO,
+        "Sandbox staging passed: %u bytes, format valid, not executed",
+        (unsigned int)size);
     return true;
 }
 

@@ -17,15 +17,25 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+/* Size of the static staging area an update image is copied into.
+ * An image larger than this is rejected rather than truncated.
+ *
+ * Bounded static storage, per NASA Power of Ten rule 3. This replaces the
+ * two magic addresses (0x900000 code, 0xA00000 data) the sandbox used to
+ * copy into. Those addresses were never mapped, so the copy faulted. */
+#define SANDBOX_STAGE_SIZE  65536u
+
 /**
- * Apply an update in a sandbox environment for testing
- * 
- * Creates an isolated test environment to run the update
- * to check for faults or security issues before committing.
- * 
- * @param image Pointer to the update binary 
- * @param size Size of the update binary
- * @return true if the update behaved correctly in sandbox
+ * Stage an update image in the sandbox area and validate its format.
+ *
+ * Copies the image into a static kernel staging buffer and checks the
+ * ELF magic. It does NOT execute the image — LughOS has no mechanism to
+ * run an untrusted binary under supervision yet, so the staging buffer
+ * is kernel-only memory and nothing branches into it.
+ *
+ * @param image Pointer to the update binary
+ * @param size Size of the update binary, at most SANDBOX_STAGE_SIZE
+ * @return true when the image staged and its format validated
  */
 bool sandbox_apply(const uint8_t *image, size_t size);
 
