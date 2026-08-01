@@ -233,35 +233,31 @@ void test_update_system(void) {
     // Initialize the update transaction
     const char *test_path = "/services/test_update.bin";
 
-    /* NOTE (Phase 4 F4): test_path is deliberately NOT registered with
-     * storage_register_buffer. Registering it makes create_checkpoint
-     * succeed, the pipeline then advances into sandbox_apply, and the
-     * kernel takes a hard data abort:
-     *
-     *   DABORT pc=0x000192BC va=0x00900000 dfsr=0x05 (section translation)
-     *
-     * sandbox_apply calls map_user_space for the 0x900000 sandbox code
-     * region and then memcpys into it, but the mapping does not take
-     * effect on ARM, so the copy faults. That defect predates this test
-     * and is masked today only because the checkpoint step fails first.
-     *
-     * Until sandbox_apply is repaired, this test exercises the checkpoint
-     * step and the rollback path only. The workflow engine itself is
-     * covered end-to-end by test_workflow(). */
+    /* Register the target path as a checkpointable buffer. Without it the
+     * first pipeline step fails on an unknown key and the test proves
+     * nothing about the four steps behind it. There is no filesystem in
+     * Phase 3/4, so a registered buffer is what a "path" resolves to. */
+    static uint8_t target_buf[256];
+    for (size_t i = 0; i < sizeof(target_buf); i++) {
+        target_buf[i] = 0xA5u;   /* pre-update contents */
+    }
+    if (storage_register_buffer(test_path, target_buf, sizeof(target_buf)) != 0) {
+        log_message(LOG_ERROR, "Update test setup FAIL: register_buffer\n");
+        return;
+    }
+
     if (init_update_transaction(&update, UPDATE_TYPE_SERVICE, test_path,
                               test_binary, test_size, hash) == 0) {
 
         // Execute the update
         int result = execute_update(&update);
 
-        /* With test_path unregistered the checkpoint step must fail, and
-         * the workflow must roll back cleanly rather than report success
-         * or land in ERROR. UPDATE_STATUS_ROLLBACK is therefore the PASS
-         * condition here, and it is a value that was unreachable before
-         * the pipeline moved onto the workflow engine. */
-        if (result != 0 && update.status == UPDATE_STATUS_ROLLBACK) {
+        /* All five steps must commit. UPDATE_STATUS_COMPLETE is the only
+         * acceptable terminal stage — a rollback here would mean a step
+         * regressed, and ERROR would mean the undo chain also failed. */
+        if (result == 0 && update.status == UPDATE_STATUS_COMPLETE) {
             log_message(LOG_INFO,
-                "Update test PASS: checkpoint failed, workflow rolled back\n");
+                "Update test PASS: all 5 workflow steps committed\n");
         } else {
             log_message(LOG_ERROR,
                 "Update test FAIL: rv=%d stage=%d\n",
@@ -1165,6 +1161,183 @@ subtest3:
     log_message(LOG_INFO, "Storage tests: %d/3 passed\n", pass);
 }
 
+/* ── Memory map regression test (Phase 4 F5) ────────────────────────
+ *
+ * Guards the kernel-heap / user-program overlap that corrupted the user
+ * task's entry code on the first successful user IPC. memory.c holds a
+ * _Static_assert that makes a reintroduction a build failure. This test
+ * covers what the static assertion cannot: that the allocator actually
+ * hands out addresses from the region the map claims. */
+static void test_memory_map(void) {
+    log_message(LOG_INFO, "Testing memory map...\n");
+    int pass = 0;
+
+    /* ── Subtest 1: the heap must not intersect the user region ──── */
+    {
+        const int disjoint = (MM_HEAP_END <= MM_USER_LOAD_BASE) ||
+                             (MM_HEAP_START >= MM_USER_REGION_END);
+        if (disjoint) {
+            log_message(LOG_INFO,
+                "Memory map test 1 PASS: heap [0x%x,0x%x) disjoint from user [0x%x,0x%x)\n",
+                (unsigned int)MM_HEAP_START, (unsigned int)MM_HEAP_END,
+                (unsigned int)MM_USER_LOAD_BASE, (unsigned int)MM_USER_REGION_END);
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Memory map test 1 FAIL: heap [0x%x,0x%x) OVERLAPS user [0x%x,0x%x)\n",
+                (unsigned int)MM_HEAP_START, (unsigned int)MM_HEAP_END,
+                (unsigned int)MM_USER_LOAD_BASE, (unsigned int)MM_USER_REGION_END);
+        }
+    }
+
+    /* ── Subtest 2: no allocation may land in the user region ─────
+     *
+     * One block from each size class. The size class table is what the
+     * IPC path draws from, so this exercises the same blocks that
+     * overwrote the user program. */
+    {
+        static const size_t sizes[4] = { 64u, 256u, 1024u, 4096u };
+        void *p[4];
+        int ok = 1;
+        int i;
+
+        for (i = 0; i < 4; i++) {
+            p[i] = alloc_memory(sizes[i]);
+            if (p[i] == NULL) {
+                log_message(LOG_ERROR,
+                    "Memory map test 2 FAIL: alloc_memory(%u) returned NULL\n",
+                    (unsigned int)sizes[i]);
+                ok = 0;
+                continue;
+            }
+            const uintptr_t a = (uintptr_t)p[i];
+            if (a >= MM_USER_LOAD_BASE && a < MM_USER_REGION_END) {
+                log_message(LOG_ERROR,
+                    "Memory map test 2 FAIL: alloc_memory(%u) = 0x%x is inside user space\n",
+                    (unsigned int)sizes[i], (unsigned int)a);
+                ok = 0;
+            }
+            if (a < MM_HEAP_START || a >= MM_HEAP_END) {
+                log_message(LOG_ERROR,
+                    "Memory map test 2 FAIL: alloc_memory(%u) = 0x%x is outside the heap\n",
+                    (unsigned int)sizes[i], (unsigned int)a);
+                ok = 0;
+            }
+        }
+        for (i = 0; i < 4; i++) {
+            free_memory(p[i]);   /* NULL is ignored by free_memory */
+        }
+
+        if (ok) {
+            log_message(LOG_INFO,
+                "Memory map test 2 PASS: 4/4 allocations inside the heap, none in user space\n");
+            pass++;
+        }
+    }
+
+    /* ── Subtest 3: the region table actually discriminates ───────
+     *
+     * The point of deriving regions from linker symbols is that the
+     * validator stops being decorative. Before that, the hardcoded table
+     * described a layout no target had: on ARM the kernel sat outside
+     * every region, so the check returned true for everything; on x86
+     * the kernel's .bss sat inside a write-denied "Kernel code" region,
+     * so writes to kernel globals were refused and strcpy silently
+     * produced empty strings.
+     *
+     * A denial logs a LOG_WARNING. The two warnings this subtest
+     * provokes are expected, and their absence is the failure. */
+    {
+        extern char _text_start[];
+        static uint8_t bss_probe;   /* .bss — must be writable */
+
+        const int text_write_denied =
+            !security_validate_memory_access((void*)_text_start, 4u, true);
+        const int text_read_allowed =
+            security_validate_memory_access((void*)_text_start, 4u, false);
+        const int bss_write_allowed =
+            security_validate_memory_access((void*)&bss_probe, 1u, true);
+        const int null_read_denied =
+            !security_validate_memory_access((void*)0x4u, 4u, false);
+
+        if (text_write_denied && text_read_allowed &&
+            bss_write_allowed && null_read_denied) {
+            log_message(LOG_INFO,
+                "Memory map test 3 PASS: text RO, bss RW, null guard denies\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Memory map test 3 FAIL: text_w_denied=%d text_r_ok=%d "
+                "bss_w_ok=%d null_denied=%d\n",
+                text_write_denied, text_read_allowed,
+                bss_write_allowed, null_read_denied);
+        }
+    }
+
+    log_message(LOG_INFO, "Memory map tests: %d/3 passed\n", pass);
+}
+
+/* ── Sandbox staging test (Phase 4 F5) ──────────────────────────────
+ *
+ * sandbox_apply used to map two magic addresses (0x900000, 0xA00000)
+ * through map_user_space and then memcpy into them. map_user_space
+ * created no mapping and returned 0 anyway, so the copy took a section
+ * translation fault:
+ *     DABORT pc=0x000192BC va=0x00900000 dfsr=0x05
+ * Reaching this code at all required the update pipeline to get past the
+ * checkpoint step, which it never did, so the fault stayed hidden. */
+static void test_sandbox_staging(void) {
+    log_message(LOG_INFO, "Testing sandbox staging...\n");
+    int pass = 0;
+
+    /* ── Subtest 1: a well-formed image stages without faulting ──── */
+    {
+        static uint8_t img[512];
+        size_t i;
+        img[0] = 0x7Fu; img[1] = 'E'; img[2] = 'L'; img[3] = 'F';
+        for (i = 4u; i < sizeof(img); i++) {
+            img[i] = (uint8_t)(i & 0xFFu);
+        }
+        if (sandbox_apply(img, sizeof(img))) {
+            log_message(LOG_INFO,
+                "Sandbox test 1 PASS: 512-byte image staged, no fault\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR, "Sandbox test 1 FAIL: rejected a valid image\n");
+        }
+    }
+
+    /* ── Subtest 2: a non-ELF image is rejected ───────────────────── */
+    {
+        static uint8_t bad[128];
+        size_t i;
+        for (i = 0u; i < sizeof(bad); i++) {
+            bad[i] = 0xFFu;   /* no ELF magic */
+        }
+        if (!sandbox_apply(bad, sizeof(bad))) {
+            log_message(LOG_INFO, "Sandbox test 2 PASS: non-ELF image rejected\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR, "Sandbox test 2 FAIL: accepted a non-ELF image\n");
+        }
+    }
+
+    /* ── Subtest 3: an image too large for the staging area is
+     *              rejected rather than overrunning it ───────────── */
+    {
+        if (!sandbox_apply((const uint8_t *)"\x7F" "ELF", SANDBOX_STAGE_SIZE + 1u)) {
+            log_message(LOG_INFO,
+                "Sandbox test 3 PASS: oversized image rejected (limit %u bytes)\n",
+                (unsigned int)SANDBOX_STAGE_SIZE);
+            pass++;
+        } else {
+            log_message(LOG_ERROR, "Sandbox test 3 FAIL: accepted an oversized image\n");
+        }
+    }
+
+    log_message(LOG_INFO, "Sandbox tests: %d/3 passed\n", pass);
+}
+
 /* ── Workflow engine test (Phase 4 F4) ──────────────────────────────
  *
  * Five subtests over the durable-workflow engine. The step callbacks
@@ -1559,6 +1732,8 @@ void kmain(void) {
     test_fault_telemetry();
     test_transactional_storage();
     test_workflow();
+    test_memory_map();
+    test_sandbox_staging();
     test_nng_patterns();
 
     // Test the update system
