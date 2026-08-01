@@ -105,6 +105,7 @@ SCHEDULER_SRC = services/scheduler/round_robin.c services/scheduler/utils.c
 STORAGE_SRC = services/storage/storage.c services/storage/transactions.c
 UPDATE_SRC = services/update/update.c services/update/sandbox.c
 AUDITOR_SRC = services/auditor/exporter.c kernel/ring_buffer.c
+WORKFLOW_SRC = services/workflow/workflow.c
 X86_BOOT_SRC = kernel/arch/x86/boot_x86.S kernel/arch/x86/enter_user_mode.S \
                kernel/arch/x86/gdt_load.S kernel/arch/x86/isr_stubs.S \
                kernel/arch/x86/context_switch.S
@@ -131,13 +132,13 @@ USER_ARM_OBJS = $(USER_LIB_SRC:.c=.user.arm.o) $(USER_TEST_SRC:.c=.user.arm.o) $
 USER_RISCV_OBJS = $(USER_LIB_SRC:.c=.user.riscv.o) $(USER_TEST_SRC:.c=.user.riscv.o) $(USER_RISCV_BOOT_SRC:.S=.user.riscv.o) $(USER_RISCV_SYSCALL_SRC:.S=.user.riscv.o)
 
 X86_OBJS = $(KERNEL_SRC:.c=.x86.o) $(X86_SPECIFIC_SRC:.c=.x86.o) $(SCHEDULER_SRC:.c=.x86.o) $(STORAGE_SRC:.c=.x86.o) \
-           $(UPDATE_SRC:.c=.x86.o) $(AUDITOR_SRC:.c=.x86.o) \
+           $(UPDATE_SRC:.c=.x86.o) $(AUDITOR_SRC:.c=.x86.o) $(WORKFLOW_SRC:.c=.x86.o) \
            $(X86_BOOT_SRC:.S=.x86.o) $(X86_SYSCALL_SRC:.S=.x86.o) $(SYSCALL_SRC:.c=.x86.o)
 ARM_OBJS = $(KERNEL_SRC:.c=.arm.o) $(ARM_SPECIFIC_SRC:.c=.arm.o) $(SCHEDULER_SRC:.c=.arm.o) $(STORAGE_SRC:.c=.arm.o) \
-           $(UPDATE_SRC:.c=.arm.o) $(AUDITOR_SRC:.c=.arm.o) \
+           $(UPDATE_SRC:.c=.arm.o) $(AUDITOR_SRC:.c=.arm.o) $(WORKFLOW_SRC:.c=.arm.o) \
            $(ARM_BOOT_SRC:.S=.arm.o) $(ARM_SYSCALL_SRC:.S=.arm.o) $(SYSCALL_SRC:.c=.arm.o)
 RISCV_OBJS = $(KERNEL_SRC:.c=.riscv.o) $(RISCV_SPECIFIC_SRC:.c=.riscv.o) $(SCHEDULER_SRC:.c=.riscv.o) $(STORAGE_SRC:.c=.riscv.o) \
-           $(UPDATE_SRC:.c=.riscv.o) $(AUDITOR_SRC:.c=.riscv.o) \
+           $(UPDATE_SRC:.c=.riscv.o) $(AUDITOR_SRC:.c=.riscv.o) $(WORKFLOW_SRC:.c=.riscv.o) \
            $(RISCV_BOOT_SRC:.S=.riscv.o) $(RISCV_SYSCALL_SRC:.S=.riscv.o) $(SYSCALL_SRC:.c=.riscv.o)
 
 X86_OUT = build/x86

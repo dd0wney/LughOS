@@ -49,6 +49,7 @@ typedef __builtin_va_list va_list;
 #define OP_UPDATE 0x102     /* System update operation */
 #define OP_WRITE 0x200
 #define OP_DELETE 0x201
+#define OP_WORKFLOW 0x202   /* workflow step boundary; see include/workflow.h */
 
 /* Logging levels */
 typedef enum {

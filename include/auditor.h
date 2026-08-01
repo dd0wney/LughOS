@@ -24,6 +24,7 @@
 #define AUDITOR_REC_TASK_EXIT    7u  /* task terminated via SYS_EXIT */
 #define AUDITOR_REC_DOMAIN_EDGE  8u  /* domain matrix mutation    */
 #define AUDITOR_REC_FAULT        9u  /* ARM abort (prefetch/data) */
+#define AUDITOR_REC_WORKFLOW    10u  /* durable-workflow step boundary */
 
 /* Fault subtypes — packed into the wire record's `protocol` byte.
  * The DFSR W-bit (bit 11) is decoded at the call site so Python
@@ -102,6 +103,26 @@
  *                busy-loop. Accesses current_task directly (declared extern
  *                in lugh.h) — the abort site does not need to pass task
  *                context explicitly.
+ *
+ *   WORKFLOW:    priority=0, src_domain=task.domain & 0xFF (0 = no current_task),
+ *                protocol=WF_EV_* event subtype (see include/workflow.h),
+ *                channel_id=step index, or step_count for a workflow-level
+ *                event (BEGIN / COMMIT / ROLLED_BACK / FAILED),
+ *                operation=workflow_id low 32 bits,
+ *                checksum=workflow_id high 32 bits,
+ *                payload_hash[0..3]=owner_task_id,
+ *                payload_hash[4..7]=workflow_status_t at emit time,
+ *                payload_hash[8..11]=done_count (the undo cursor),
+ *                payload_hash[12..15]=step return value, sign-extended.
+ *                Emitted synchronously (no ring) from every step boundary
+ *                in services/workflow/workflow.c. The full 64-bit
+ *                workflow_id is split across operation and checksum so the
+ *                encoder can group a workflow's events without a join
+ *                against the transaction log. WF_EV_BEGIN with a step
+ *                index inside [0, step_count) is the per-step INTENT
+ *                record, written before the step runs — the pair
+ *                BEGIN(i) with no following STEP_OK(i)/STEP_FAIL(i) is
+ *                exactly the signature of an abort inside step i.
  *
  *   TASK_EXIT:   priority=0, src_domain=0, protocol=0, channel_id=0,
  *                operation=task_id, checksum=(uint32_t)exit_code,
@@ -225,5 +246,25 @@ void auditor_fault(uint32_t fault_pc,
                    uint32_t dfsr,
                    uint32_t spsr,
                    uint8_t  fault_type);
+
+/* Workflow step boundary — emitted synchronously from workflow_run and
+ * workflow_recover, so the record lands before the effect it describes
+ * can be lost to an abort.
+ *
+ * workflow_id   — full 64-bit id, split across operation and checksum
+ * owner_task_id — current_task at workflow_begin, or 0
+ * step_index    — index of the step, or step_count for a workflow event
+ * status        — workflow_status_t at emit time
+ * done_count    — steps completed so far (the undo cursor)
+ * step_rv       — the callback's return value, 0 for workflow-level events
+ * event         — WF_EV_* subtype from include/workflow.h
+ */
+void auditor_workflow(uint64_t workflow_id,
+                      uint32_t owner_task_id,
+                      uint32_t step_index,
+                      uint32_t status,
+                      uint32_t done_count,
+                      int      step_rv,
+                      uint8_t  event);
 
 #endif /* AUDITOR_H */
