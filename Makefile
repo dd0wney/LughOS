@@ -50,7 +50,8 @@ COMMON_CFLAGS = -ffreestanding -nostdlib -Wall -Wextra -Werror -Wformat=2 -Wform
          -fdata-sections -ffunction-sections \
          -Wshadow -Wpointer-arith -Wcast-align -Wstrict-prototypes -Wredundant-decls \
          -Wconversion -Wno-unused-parameter \
-         -DDEBUG -D_FORTIFY_SOURCE=2 -Iinclude -Ilib/nng/include -O2
+         -DDEBUG -D_FORTIFY_SOURCE=2 -Iinclude -Ilib/nng/include -O2 \
+         -MMD -MP
 
 X86_CFLAGS = $(COMMON_CFLAGS) $(X86_ARCH_FLAGS)
 # ARM target: QEMU `versatilepb` board has an ARM926EJ-S (ARMv5TE).
@@ -164,6 +165,21 @@ endif
 ifeq ($(RISCV_TOOLCHAIN_AVAILABLE),1)
   ALL_TARGETS += riscv
 endif
+
+# Header dependency tracking. -MMD -MP (in COMMON_CFLAGS) makes the
+# compiler emit a .d file beside each object listing the headers it
+# included; -include pulls those in as extra prerequisites.
+#
+# Without this, editing a header rebuilt nothing. `make arm` after a
+# change to include/memory.h reused the stale kernel/mm/memory.arm.o and
+# reported success, so a _Static_assert added to catch a bad memory map
+# did not fire until `make clean`. Every header-based guard in the tree
+# was only as good as the last full rebuild.
+#
+# The `-` prefix keeps the first build (no .d files yet) quiet.
+ALL_DEP_FILES = $(X86_OBJS:.o=.d) $(ARM_OBJS:.o=.d) $(RISCV_OBJS:.o=.d) \
+                $(USER_X86_OBJS:.o=.d) $(USER_ARM_OBJS:.o=.d) $(USER_RISCV_OBJS:.o=.d)
+-include $(ALL_DEP_FILES)
 
 all: $(ALL_TARGETS)
 	@if [ -z "$(ALL_TARGETS)" ]; then \
@@ -305,6 +321,7 @@ $(RISCV_USER_OBJ): $(RISCV_USER_BIN)
 
 clean:
 	rm -rf build *.o kernel/*.o kernel/*/*.o kernel/*/*/*.o services/*/*.o user/*.o user/*/*.o
+	rm -f *.d kernel/*.d kernel/*/*.d kernel/*/*/*.d services/*/*.d user/*.d user/*/*.d
 
 run: x86
 	@echo "Running LughOS x86 in QEMU..."
