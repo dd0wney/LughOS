@@ -299,14 +299,20 @@ jobs:
               failed=$((failed + 1))
               continue
             fi
-            # run_unit_tests.sh exits non-zero on a real failure. The old
-            # `|| true` here threw that away.
-            if ./scripts/run_unit_tests.sh "${arch}"; then
-              echo "| ${arch} | ✅ | ✅ |" >> test-logs/test-summary.md
-            else
-              echo "| ${arch} | ✅ | ❌ |" >> test-logs/test-summary.md
-              failed=$((failed + 1))
-            fi
+            # run_unit_tests.sh distinguishes three outcomes, and so must
+            # this table. Collapsing 2 into 0 would print a green tick for
+            # an architecture nothing booted.
+            #   0 booted and passed   1 failed   2 not exercised
+            set +e
+            ./scripts/run_unit_tests.sh "${arch}"
+            rc=$?
+            set -e
+            case "${rc}" in
+              0) echo "| ${arch} | ✅ | ✅ passed |" >> test-logs/test-summary.md ;;
+              2) echo "| ${arch} | ✅ | ⚠️ not exercised |" >> test-logs/test-summary.md ;;
+              *) echo "| ${arch} | ✅ | ❌ failed |" >> test-logs/test-summary.md
+                 failed=$((failed + 1)) ;;
+            esac
           done
 
           cat test-logs/test-summary.md >> "$GITHUB_STEP_SUMMARY"

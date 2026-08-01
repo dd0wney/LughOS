@@ -19,7 +19,15 @@
 #
 #     ./scripts/run_unit_tests.sh <x86|arm|riscv>
 #
-# Exit 0 when the architecture booted and reached the marker, 1 otherwise.
+# Exit status:
+#   0  the architecture booted and reached the marker
+#   1  it did not, or the kernel image is absent
+#   2  the architecture is not exercised (see the riscv note below)
+#
+# 2 is distinct from 0 on purpose. A caller that treats "not exercised" as
+# a pass reports a green tick for an architecture nothing ran, which is the
+# report claiming more than it checked.
+#
 # Set LUGHOS_TEST_TIMEOUT to change the per-boot limit (default 40s).
 
 set -u
@@ -91,7 +99,7 @@ case "${ARCH}" in
             echo "kernel never reaches the test groups. Build is checked;"
             echo "boot is not."
         } >> "${REPORT}"
-        exit 0
+        exit 2
         ;;
     *)
         echo -e "${RED}Unknown architecture: ${ARCH}${NC}"
