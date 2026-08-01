@@ -177,10 +177,30 @@ bool run_tests(const char *path) {
  * infer it afterwards.
  */
 
+/* Every checkpoint operation goes through the installed backend rather
+ * than calling the free functions in transactions.c. A direct call always
+ * reaches the in-memory implementation whatever backend is installed,
+ * which is exactly what made storage_ops_t decorative before Phase 4 F6.
+ *
+ * Returns NULL and logs if no backend is installed. Each caller treats
+ * that as a step failure, so a missing backend rolls the workflow back
+ * instead of proceeding on an assumption. */
+static storage_ops_t *update_storage(void) {
+    storage_ops_t *ops = storage_backend();
+    if (ops == NULL) {
+        log_message(LOG_ERROR, "No storage backend installed");
+    }
+    return ops;
+}
+
 static int step_checkpoint(void *ctx) {
     struct update_state *st = (struct update_state *)ctx;
     st->status = UPDATE_STATUS_CHECKPOINT;
-    if (create_checkpoint(st->tx.path, st->tx.checkpoint) != 0) {
+    storage_ops_t *ops = update_storage();
+    if (ops == NULL) {
+        return -1;
+    }
+    if (ops->create_checkpoint(st->tx.path, st->tx.checkpoint) != 0) {
         log_message(LOG_ERROR, "Checkpoint failed");
         return -1;
     }
@@ -192,7 +212,11 @@ static int step_checkpoint(void *ctx) {
  * snapshot has already happened by the time this fires. */
 static int undo_remove_checkpoint(void *ctx) {
     struct update_state *st = (struct update_state *)ctx;
-    return remove_checkpoint(st->tx.checkpoint);
+    storage_ops_t *ops = update_storage();
+    if (ops == NULL) {
+        return -1;
+    }
+    return ops->remove_checkpoint(st->tx.checkpoint);
 }
 
 static int step_verify(void *ctx) {
@@ -227,7 +251,11 @@ static int step_install(void *ctx) {
  * rollback_update() threw away, so a failed restore reported success. */
 static int undo_restore_checkpoint(void *ctx) {
     struct update_state *st = (struct update_state *)ctx;
-    if (restore_checkpoint(st->tx.checkpoint, st->tx.path) != 0) { /* JPL Rule 14 */
+    storage_ops_t *ops = update_storage();
+    if (ops == NULL) {
+        return -1;
+    }
+    if (ops->restore_checkpoint(st->tx.checkpoint, st->tx.path) != 0) { /* JPL Rule 14 */
         log_message(LOG_ERROR, "Restore from checkpoint FAILED");
         return -1;
     }
@@ -272,7 +300,10 @@ int apply_update(struct update_state *state) {
          * checkpoint is the only thing that makes a rollback possible — the
          * old commit_update() removed it in the same breath as the install,
          * which left the install with nothing to fall back to. */
-        (void)remove_checkpoint(state->tx.checkpoint);
+        storage_ops_t *ops = update_storage();
+        if (ops != NULL) {
+            (void)ops->remove_checkpoint(state->tx.checkpoint);
+        }
         state->status = UPDATE_STATUS_COMPLETE;
         log_message(LOG_INFO, "Committed update");
         workflow_release(wf);

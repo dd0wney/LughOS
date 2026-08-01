@@ -8,8 +8,14 @@
 /* Hot-swappable storage backend interface. Mirrors scheduler_ops_t in
  * include/lugh.h — every backend is a vtable of named methods so the
  * kernel can hot-swap implementations under a quiesce-and-resume
- * protocol. For Phase 3 there is exactly one backend (memory_storage_ops);
- * the interface exists so the swap path is testable. */
+ * protocol.
+ *
+ * Until Phase 4 F6 this vtable was eight stubs that each returned 0
+ * without doing anything, and nothing in the tree referred to it. Every
+ * caller used the free functions below directly, so the "interface exists
+ * so the swap path is testable" claim was not true — swapping the backend
+ * changed nothing. The methods now carry the real implementations, and
+ * callers dispatch through storage_backend(). */
 typedef struct {
     const char* name;
     int  (*init)(void* context);
@@ -24,6 +30,37 @@ typedef struct {
 
 /* Concrete in-memory storage backend. Defined in services/storage/storage.c. */
 extern storage_ops_t memory_storage_ops;
+
+/**
+ * Install memory_storage_ops as the active backend.
+ *
+ * Call once at boot, after memory_init() and before any subsystem starts
+ * a workflow. storage_backend() returns NULL until this runs, and every
+ * dispatching caller checks for that.
+ */
+void storage_init(void);
+
+/**
+ * Replace the active storage backend.
+ *
+ * Every checkpoint operation a caller performs through storage_backend()
+ * goes to the new backend from the next call onward. There is no quiesce
+ * here: a caller mid-workflow keeps whatever pointer it already read, so
+ * swap between workflows, not during one.
+ *
+ * @param ops backend to install; NULL is rejected and leaves the current
+ *            backend in place
+ */
+void storage_set_backend(storage_ops_t *ops);
+
+/**
+ * The active storage backend, or NULL before storage_init().
+ *
+ * Dispatch through this rather than calling create_checkpoint and friends
+ * directly. A direct call always reaches the in-memory implementation,
+ * whatever backend is installed, which is what made the seam decorative.
+ */
+storage_ops_t *storage_backend(void);
 
 /* Bounded sizing constants for the in-memory storage backend. */
 #define MAX_CHECKPOINTS  16u
