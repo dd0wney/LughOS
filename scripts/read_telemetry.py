@@ -82,7 +82,18 @@ REC_TYPE_NAME = {0: "MSG", 1: "OVERFLOW", 2: "HEARTBEAT", 3: "DENY",
                  4: "TASK_CREATE",
                  5: "CHAN_CREATE", 6: "CHAN_CONNECT",
                  7: "TASK_EXIT",
-                 8: "DOMAIN_EDGE"}
+                 8: "DOMAIN_EDGE",
+                 9: "FAULT",
+                 10: "WORKFLOW"}
+
+# WORKFLOW record subtypes, carried in the `protocol` byte.
+# Mirrors the WF_EV_* constants in include/workflow.h.
+WF_EVENT_NAME = {0: "BEGIN", 1: "STEP_OK", 2: "STEP_FAIL", 3: "UNDO_OK",
+                 4: "UNDO_FAIL", 5: "COMMIT", 6: "ROLLED_BACK", 7: "FAILED"}
+
+# Mirrors workflow_status_t in include/workflow.h.
+WF_STATUS_NAME = {0: "IDLE", 1: "RUNNING", 2: "COMMITTED",
+                  3: "ROLLING_BACK", 4: "ROLLED_BACK", 5: "FAILED"}
 
 # Mirrors include/lugh.h TASK_PARENT_NONE — kernel root task.
 TASK_PARENT_NONE = 0xFFFFFFFF
@@ -245,20 +256,50 @@ def format_record(r: dict) -> str:
             f"parent={parent_str}  depth={lineage_depth} sibs={sibling_count}"
         )
 
+    if r["type"] == 10:  # WORKFLOW (Phase 4 F4)
+        raw_hash = bytes.fromhex(r["payload_hash"])
+        # The full 64-bit workflow_id is split across operation (low) and
+        # checksum (high) — see the field map in include/auditor.h.
+        wf_id  = (r["checksum"] << 32) | r["operation"]
+        owner  = _unpack_le32(raw_hash, 0)
+        status = _unpack_le32(raw_hash, 4)
+        done   = _unpack_le32(raw_hash, 8)
+        rv_raw = _unpack_le32(raw_hash, 12)
+        rv     = rv_raw - (1 << 32) if rv_raw >= (1 << 31) else rv_raw
+
+        ev_name     = WF_EVENT_NAME.get(r["protocol"], f"UNKNOWN({r['protocol']})")
+        status_name = WF_STATUS_NAME.get(status, f"UNKNOWN({status})")
+
+        return (
+            f"[j={j:>7}]  WORKFLOW  "
+            f"wf=0x{wf_id:016X}  "
+            f"event={ev_name:<12} step={ch}  "
+            f"status={status_name:<12} done={done}  "
+            f"owner_task={owner}  rv={rv}"
+        )
+
     return f"[j={j:>7}]  UNKNOWN   type={r['type']}"
 
 
-def tail_records(path: str):
-    """Yield one 44-byte aligned record at a time, blocking until data arrives."""
+def tail_records(path: str, follow: bool = True):
+    """Yield one 44-byte aligned record at a time.
+
+    follow=True blocks at EOF waiting for more data, which is what a live
+    QEMU serial capture needs. follow=False stops at EOF, which is what
+    reading an already-captured file needs — without it this generator
+    never returns and any batch consumer hangs.
+    """
     with open(path, "rb") as f:
         buf = b""
         while True:
             chunk = f.read(RECORD_SIZE - len(buf))
             if chunk:
                 buf += chunk
-            else:
+            elif follow:
                 time.sleep(0.01)
                 continue
+            else:
+                return   # EOF, and a partial trailing record is not a record
             while len(buf) >= RECORD_SIZE:
                 yield buf[:RECORD_SIZE]
                 buf = buf[RECORD_SIZE:]
@@ -288,6 +329,16 @@ def main() -> None:
         action="store_true",
         help="include DENY records in --window JSON output",
     )
+    ap.add_argument(
+        "--workflow",
+        action="store_true",
+        help="include WORKFLOW records in --window JSON output",
+    )
+    ap.add_argument(
+        "--once",
+        action="store_true",
+        help="stop at EOF instead of following the file for new records",
+    )
     args = ap.parse_args()
 
     if args.window < 0:
@@ -295,7 +346,7 @@ def main() -> None:
 
     window_buf: list = []
 
-    for raw in tail_records(args.file):
+    for raw in tail_records(args.file, follow=not args.once):
         r = parse_record(raw)
 
         if r["magic"] != MAGIC:
@@ -305,7 +356,9 @@ def main() -> None:
             continue
 
         if args.window > 0:
-            include = (r["type"] == 0) or (args.deny and r["type"] == 3)
+            include = ((r["type"] == 0)
+                       or (args.deny and r["type"] == 3)
+                       or (args.workflow and r["type"] == 10))
             if include:
                 entry: dict = {
                     "type":       REC_TYPE_NAME.get(r["type"], r["type"]),
@@ -325,6 +378,19 @@ def main() -> None:
                     entry["dst_domain"]   = (r["checksum"] >> 8)  & 0xFF
                     entry["granted_caps"] = _unpack_le32(raw_hash, 0)
                     entry["required_caps"]= _unpack_le32(raw_hash, 4)
+                elif r["type"] == 10:
+                    raw_hash = bytes.fromhex(r["payload_hash"])
+                    rv_raw = _unpack_le32(raw_hash, 12)
+                    entry["workflow_id"]  = (r["checksum"] << 32) | r["operation"]
+                    entry["wf_event"]     = WF_EVENT_NAME.get(
+                        r["protocol"], r["protocol"])
+                    entry["step_index"]   = r["channel_id"]
+                    entry["owner_task"]   = _unpack_le32(raw_hash, 0)
+                    entry["wf_status"]    = WF_STATUS_NAME.get(
+                        _unpack_le32(raw_hash, 4), _unpack_le32(raw_hash, 4))
+                    entry["done_count"]   = _unpack_le32(raw_hash, 8)
+                    entry["step_rv"]      = (rv_raw - (1 << 32)
+                                             if rv_raw >= (1 << 31) else rv_raw)
                 window_buf.append(entry)
                 if len(window_buf) >= args.window:
                     print(json.dumps(window_buf))

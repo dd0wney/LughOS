@@ -55,6 +55,7 @@ REC_TYPE_NAME = {
     7: "TASK_EXIT",
     8: "DOMAIN_EDGE",
     9: "FAULT",
+    10: "WORKFLOW",
 }
 
 # Categories a healthy boot exercises (test_auditor, test_ipc_enforcement,
