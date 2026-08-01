@@ -31,6 +31,10 @@ jobs:
             -- -Iinclude || true
           echo "See clang-tidy-fixes.yaml for issues found"
 
+      # services/auditor and services/workflow were missing from this list,
+      # so the telemetry exporter and the workflow engine were never
+      # analysed. Use services/*/*.c so a new service directory is covered
+      # the day it is added, rather than the day someone remembers.
       - name: Run static analysis with Cppcheck
         run: |
           mkdir -p reports
@@ -38,18 +42,31 @@ jobs:
             --xml --xml-version=2 \
             -Iinclude \
             kernel/*.c kernel/*/*.c kernel/*/*/*.c \
-            services/scheduler/*.c services/storage/*.c services/update/*.c \
+            services/*/*.c \
             2> reports/cppcheck-report.xml
-          echo "Cppcheck analysis completed, see reports/cppcheck-report.xml for details"
+          echo "Cppcheck analysis completed, see reports/cppcheck-report.xml"
 
-      - name: Generate HTML report from Cppcheck XML
+      # Replaces an xsltproc call against
+      # /usr/share/cppcheck/cppcheck-htmlreport.xslt. That file has not
+      # shipped with cppcheck for years, so the step failed on every run
+      # with "failed to load external entity" and took the whole job with
+      # it. The job could therefore only fail for a cosmetic reason and
+      # never for an actual finding.
+      #
+      # --fail-on error makes the job mean something: an error-severity
+      # finding now fails CI. There are none today. Style and warning
+      # findings are reported but do not gate, because the tree carries
+      # roughly a hundred of them and gating on those would be a separate
+      # piece of work.
+      - name: Generate report and gate on error-severity findings
         run: |
-          sudo apt-get install -y xsltproc
-          xsltproc --stringparam title "LughOS Cppcheck Report" \
-            /usr/share/cppcheck/cppcheck-htmlreport.xslt \
-            reports/cppcheck-report.xml > reports/cppcheck-report.html
+          python3 scripts/cppcheck_report.py reports/cppcheck-report.xml \
+            --html reports/cppcheck-report.html \
+            --title "LughOS Cppcheck Report" \
+            --fail-on error
 
       - name: Upload analysis reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: static-analysis-reports
