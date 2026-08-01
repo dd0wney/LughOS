@@ -1,39 +1,35 @@
 # LughOS GitHub Actions Workflows
 
-This directory contains GitHub Actions workflows for building, testing, and analyzing LughOS.
+Two files. `reusable.yml` holds the logic, `ci.yml` triggers it.
 
-## Available Workflows
+There used to be four: `build.yml`, `matrix_build.yml`, `analysis.yml` and
+`reusable.yml`, each carrying a near-identical copy of the same jobs. A
+repair landed in one copy and not the others, and `reusable.yml` drifted
+furthest because nothing called it, so nothing ran it and nothing caught
+the rot. Collapsing to one copy that every pull request exercises is what
+stops that recurring.
 
-### 1. Build Workflow (`build.yml`)
+## The workflows
 
-The main workflow for building LughOS and running basic tests.
+### `reusable.yml` — the logic
 
-- Builds for x86, ARM, and RISC-V architectures
-- Installs the required toolchains and dependencies
-- Runs QEMU tests
-- Uploads build artifacts and test logs
+Four jobs:
 
-### 2. Matrix Build Workflow (`matrix_build.yml`)
+| Job | What it does | Gates on |
+|---|---|---|
+| `setup` | Caches the i686-elf toolchain and the NNG build, then compiles a probe file to prove the toolchain works | the probe compiling |
+| `build` | Matrix over the requested architectures, `make <arch>`, then `scripts/run_tests.sh` on x86 | the build, and the QEMU test result |
+| `analysis` | clang-tidy (advisory) and Cppcheck | an error-severity Cppcheck finding |
+| `test` | `scripts/run_unit_tests.sh` per architecture | a missing artifact, or a boot that fails |
 
-A more efficient version of the build workflow that uses a matrix strategy to build multiple architectures in parallel.
+Inputs: `architectures` (JSON array, default all three), `run-tests`,
+`run-analysis`.
 
-- Builds for x86, ARM, and RISC-V architectures in parallel
-- Shares toolchain artifacts between jobs
-- Generates a combined test report
+### `ci.yml` — the trigger
 
-### 3. Static Analysis Workflow (`analysis.yml`)
+Calls `reusable.yml` on push and pull request against `main`.
 
-Performs code quality and security checks.
-
-- Runs clang-tidy with CERT C compliance checks
-- Runs Cppcheck for general code quality
-- Generates HTML reports for analysis results
-
-### 4. Reusable Workflow (`reusable.yml`)
-
-A reusable workflow that can be imported by other projects that use LughOS.
-
-#### Usage Example
+## Usage from another project
 
 ```yaml
 name: My LughOS-based Project CI
@@ -57,24 +53,46 @@ jobs:
       actions: read
 ```
 
-## Common Issues and Solutions
+## Things worth knowing
 
-### Missing Toolchain
+### The toolchain travels by cache, never by artifact
 
-If you encounter errors with the i686-elf-gcc toolchain not being found:
+`actions/upload-artifact` does not preserve the executable bit, and the
+round trip did not reconstruct the `libexec` tree that holds `cc1`. Every
+x86 build that got its toolchain that way failed with:
 
-1. Check the PATH setup in the workflow
-2. Verify that the toolchain files have the correct execute permissions
-3. Look at the "Verify compiler existence" step output 
+```
+i686-elf-gcc: error trying to exec 'cc1': No such file or directory
+```
 
-### Failed Tests
+`setup` and `build` both restore the same `actions/cache` key. Do not
+reintroduce an artifact hand-off for the toolchain.
 
-Test failures will be available in the test logs artifact. Download this artifact to see detailed error messages.
+### Checks are judged on output, not on QEMU's exit status
 
-### New Architectures
+The kernel idles rather than exiting, so `timeout` always kills QEMU and
+always returns a non-zero status. Any boot check judged on that status
+cannot pass. `run_tests.sh` and `run_unit_tests.sh` both search the serial
+log for a required marker and for forbidden patterns instead.
 
-To add a new architecture:
+### RISC-V is built but not booted
 
-1. Add it to the matrix in `matrix_build.yml`
-2. Create appropriate build targets in the Makefile
-3. Add architecture-specific test scripts in the scripts directory
+`run_unit_tests.sh riscv` reports "not exercised" and does not fail. The
+kernel builds, and OpenSBI hands control to it, but its console emits empty
+`[LOG]` records and it never reaches the test groups. When that is
+repaired, delete the `riscv` branch in `run_unit_tests.sh` so it falls
+through to the same output check as the others.
+
+### Caller-supplied values never reach a shell directly
+
+`inputs.architectures` and the matrix values derived from it come from
+whoever calls the workflow. They pass into `run:` blocks through `env:`
+and are checked against an allowlist, so a caller cannot inject shell.
+
+## Adding an architecture
+
+1. Add a build target to the Makefile.
+2. Add it to the `architectures` input in `ci.yml`.
+3. Add a case to `scripts/run_unit_tests.sh` with the correct QEMU machine
+   type. Check the existing `scripts/test_<arch>.sh` for the right flags —
+   the ARM kernel needs `-M versatilepb`, not `-machine virt`.

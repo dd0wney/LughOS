@@ -1338,6 +1338,133 @@ static void test_sandbox_staging(void) {
     log_message(LOG_INFO, "Sandbox tests: %d/3 passed\n", pass);
 }
 
+/* ── Storage backend seam test (Phase 4 F6) ─────────────────────────
+ *
+ * storage_ops_t existed as a vtable of eight methods that each returned 0
+ * without doing anything, and nothing in the tree referred to it. Every
+ * caller used the free functions in services/storage/transactions.c
+ * directly, so installing a different backend changed nothing at all.
+ *
+ * Subtest 2 is the one that matters. It installs a backend whose
+ * create_checkpoint always fails and asserts the update pipeline notices.
+ * That can only pass if the pipeline really dispatches through the vtable.
+ * While the callers used the free functions it could not pass, whatever
+ * the backend said. */
+
+static int fake_ck_calls;      /* how many times the fake backend was asked */
+static int fake_ck_result;     /* what its create_checkpoint returns */
+
+static int fake_create_checkpoint(const char *src, const char *dst) {
+    (void)src; (void)dst;
+    fake_ck_calls++;
+    return fake_ck_result;
+}
+
+/* Everything else defers to the real backend, so a failure in this test
+ * points at create_checkpoint and not at some unrelated method. */
+static int fake_restore_checkpoint(const char *src, const char *dst) {
+    return memory_storage_ops.restore_checkpoint(src, dst);
+}
+
+static int fake_remove_checkpoint(const char *checkpoint) {
+    return memory_storage_ops.remove_checkpoint(checkpoint);
+}
+
+static int fake_init(void *context)                    { (void)context; return 0; }
+static int fake_get_state(void *buf, size_t *size)     { (void)buf; (void)size; return -1; }
+static int fake_set_state(void *buf, size_t size)      { (void)buf; (void)size; return -1; }
+static int fake_prepare_swap(void)                     { return 0; }
+static int fake_finalize_swap(void)                    { return 0; }
+
+static storage_ops_t fake_storage_ops = {
+    .name               = "fake-failing",
+    .init               = fake_init,
+    .create_checkpoint  = fake_create_checkpoint,
+    .restore_checkpoint = fake_restore_checkpoint,
+    .remove_checkpoint  = fake_remove_checkpoint,
+    .get_state          = fake_get_state,
+    .set_state          = fake_set_state,
+    .prepare_swap       = fake_prepare_swap,
+    .finalize_swap      = fake_finalize_swap,
+};
+
+static void test_storage_backend(void) {
+    log_message(LOG_INFO, "Testing storage backend seam...\n");
+    int pass = 0;
+
+    /* ── Subtest 1: the default backend is installed and functional ── */
+    {
+        storage_ops_t *ops = storage_backend();
+        static uint8_t probe[64];
+        size_t i;
+        for (i = 0u; i < sizeof(probe); i++) {
+            probe[i] = (uint8_t)(i & 0xFFu);
+        }
+
+        int ok = (ops != NULL) && (ops == &memory_storage_ops);
+        if (ok) {
+            ok = (storage_register_buffer("seam_probe", probe, sizeof(probe)) == 0)
+              && (ops->create_checkpoint("seam_probe", "seam_ckpt") == 0)
+              && (ops->restore_checkpoint("seam_ckpt", "seam_probe") == 0)
+              && (ops->remove_checkpoint("seam_ckpt") == 0);
+        }
+
+        if (ok) {
+            log_message(LOG_INFO,
+                "Storage seam test 1 PASS: default backend '%s' round-trips\n",
+                ops->name);
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Storage seam test 1 FAIL: backend=%s\n",
+                (ops != NULL && ops->name != NULL) ? ops->name : "(null)");
+        }
+    }
+
+    /* ── Subtest 2: swapping the backend changes what the system does ─ */
+    {
+        static uint8_t img[256];
+        size_t i;
+        img[0] = 0x7Fu; img[1] = 'E'; img[2] = 'L'; img[3] = 'F';
+        for (i = 4u; i < sizeof(img); i++) {
+            img[i] = (uint8_t)(i & 0xFFu);
+        }
+
+        fake_ck_calls  = 0;
+        fake_ck_result = -1;         /* the backend refuses to checkpoint */
+        storage_set_backend(&fake_storage_ops);
+
+        struct update_state st;
+        int rv = -1;
+        if (init_update_transaction(&st, UPDATE_TYPE_SERVICE,
+                                    "/services/seam_test.bin",
+                                    img, sizeof(img),
+                                    compute_sha256(img, sizeof(img))) == 0) {
+            rv = execute_update(&st);
+            cleanup_update_transaction(&st);
+        }
+
+        storage_set_backend(&memory_storage_ops);   /* restore before asserting */
+
+        /* The pipeline must have asked the installed backend, and must
+         * have rolled back because it said no. fake_ck_calls == 0 means
+         * the call never reached the vtable at all. */
+        if (fake_ck_calls > 0 && rv != 0 &&
+            st.status == UPDATE_STATUS_ROLLBACK) {
+            log_message(LOG_INFO,
+                "Storage seam test 2 PASS: failing backend forced rollback (%d call(s))\n",
+                fake_ck_calls);
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Storage seam test 2 FAIL: backend_calls=%d rv=%d stage=%d\n",
+                fake_ck_calls, rv, (int)st.status);
+        }
+    }
+
+    log_message(LOG_INFO, "Storage seam tests: %d/2 passed\n", pass);
+}
+
 /* ── Workflow engine test (Phase 4 F4) ──────────────────────────────
  *
  * Five subtests over the durable-workflow engine. The step callbacks
@@ -1637,6 +1764,11 @@ void kmain(void) {
     // Initialize memory subsystem (Per NASA Power of Ten rule 3: all allocation at init time)
     memory_init();
 
+    /* Install the storage backend before anything checkpoints. Every
+     * checkpoint call in the update pipeline dispatches through
+     * storage_backend(), and that returns NULL until this runs. */
+    storage_init();
+
     // Page frame allocator (Phase 3 B1) — foundation for MMU work in B2/B3/B4.
     frame_allocator_init();
 
@@ -1708,10 +1840,15 @@ void kmain(void) {
      * Must run after auditor_init so the reversal records reach the
      * telemetry stream, and before any subsystem starts a new workflow.
      *
-     * With the current RAM-only checkpoint storage this finds nothing on a
-     * cold boot — the workflow table is zeroed by then. It becomes real
-     * crash recovery unchanged once a persistent storage_ops_t backend
-     * exists. See the scope note in include/workflow.h. */
+     * On a cold boot this finds nothing: the workflow table is static
+     * memory and starts zeroed. It catches a workflow abandoned later in
+     * the same session, which is what an abort mid-pipeline produces.
+     *
+     * It does NOT become crash recovery by adding a persistent storage
+     * backend. Nothing here saves the table, and workflow_t holds raw
+     * `steps` and `ctx` pointers that mean nothing after a restart. See
+     * the scope note in include/workflow.h for the three pieces that are
+     * actually missing. */
     if (workflow_recover() != 0) {
         log_message(LOG_ERROR,
             "Workflow recovery could not reverse every workflow\n");
@@ -1731,6 +1868,7 @@ void kmain(void) {
     test_mmu_protection();
     test_fault_telemetry();
     test_transactional_storage();
+    test_storage_backend();
     test_workflow();
     test_memory_map();
     test_sandbox_staging();
