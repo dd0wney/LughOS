@@ -1,0 +1,30 @@
+# LughOS CI
+#
+# The only trigger. All logic lives in reusable.yml, which this calls.
+#
+# This replaces build.yml, matrix_build.yml and analysis.yml. Each held a
+# near-identical copy of the same jobs, so a repair landed in some and not
+# others - and reusable.yml, which nothing called, drifted furthest of all.
+# Calling the reusable workflow from here means the copy other projects
+# consume is the same one this repository exercises on every pull request.
+
+name: LughOS CI
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+  id-token: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      architectures: '["x86", "arm", "riscv"]'
+      run-tests: true
+      run-analysis: true

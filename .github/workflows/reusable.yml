@@ -1,5 +1,14 @@
 # Reusable LughOS CI Workflow
-# This workflow can be used by other projects that use LughOS
+#
+# This is the single copy of the LughOS CI logic. .github/workflows/ci.yml
+# calls it for this repository, and other projects can call it too.
+#
+# It replaced build.yml, matrix_build.yml and analysis.yml, each of which
+# held a near-identical copy of these jobs. Three copies meant a repair
+# landed in some and not others: this file sat unrepaired for months with a
+# dead xsltproc step, a toolchain that lost cc1 in transit, and three
+# `|| true` masks, because nothing called it so nothing caught the drift.
+# One copy, exercised on every pull request, cannot rot the same way.
 
 name: LughOS Reusable CI
 on:
@@ -31,12 +40,16 @@ jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
-      cache-hit-toolchain: ${{ steps.cache-i686-elf-toolchain.outputs.cache-hit }}
-      cache-hit-nng: ${{ steps.cache-nng-build.outputs.cache-hit }}
       architectures: ${{ inputs.architectures }}
     steps:
       - uses: actions/checkout@v4
 
+      # The toolchain and NNG travel by cache, never by artifact.
+      # actions/upload-artifact does not preserve the executable bit and did
+      # not reconstruct the libexec tree that holds cc1, so every x86 build
+      # downstream failed with:
+      #     i686-elf-gcc: error trying to exec 'cc1': No such file or dir
+      # The build job restores these same keys.
       - name: Cache i686-elf toolchain
         id: cache-i686-elf-toolchain
         uses: actions/cache@v4
@@ -58,7 +71,7 @@ jobs:
           mkdir -p i686-elf-tools-linux
           unzip i686-elf-tools-linux.zip -d i686-elf-tools-linux
           chmod +x i686-elf-tools-linux/bin/*
-          
+
       - name: Build and install NNG
         if: steps.cache-nng-build.outputs.cache-hit != 'true'
         run: |
@@ -70,17 +83,16 @@ jobs:
           sudo make install
           sudo ldconfig
 
-      - name: Upload toolchain artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: toolchain
-          path: i686-elf-tools-linux
-
-      - name: Upload NNG artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: nng
-          path: nng/build
+      # Compile something. `which i686-elf-gcc` succeeded on every broken
+      # run, because the driver was present and only its cc1 backend was
+      # missing. A real compile is the smallest check that tells those
+      # apart, and running it here fails before the matrix starts.
+      - name: Verify the toolchain can compile
+        run: |
+          echo 'int main(void){return 0;}' > /tmp/probe.c
+          ./i686-elf-tools-linux/bin/i686-elf-gcc \
+            -ffreestanding -nostdlib -c /tmp/probe.c -o /tmp/probe.o
+          echo "i686-elf toolchain is functional"
 
   build:
     needs: setup
@@ -98,65 +110,74 @@ jobs:
           sudo apt-get install -y gcc g++ binutils nasm gcc-arm-none-eabi binutils-arm-none-eabi
           sudo apt-get install -y gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu
           sudo apt-get install -y cmake make git qemu-system-i386 qemu-system-arm qemu-system-riscv64 unzip
-          
-          # Verify toolchains are available
-          echo "Checking toolchain availability:"
-          which i686-elf-gcc || echo "i686-elf-gcc will be installed from cached download"
-          which arm-none-eabi-gcc || echo "arm-none-eabi-gcc not found"
-          which riscv64-linux-gnu-gcc || echo "riscv64-linux-gnu-gcc not found"
 
-      - name: Download toolchain
-        uses: actions/download-artifact@v4
+      - name: Cache i686-elf toolchain
+        id: cache-i686-elf-toolchain
+        uses: actions/cache@v4
         with:
-          name: toolchain
           path: i686-elf-tools-linux
+          key: ${{ runner.os }}-i686-elf-tools-linux-7.1.0
 
-      - name: Download NNG
-        uses: actions/download-artifact@v4
+      - name: Install i686-elf-gcc
+        if: steps.cache-i686-elf-toolchain.outputs.cache-hit != 'true'
+        run: |
+          wget https://github.com/lordmilko/i686-elf-tools/releases/download/7.1.0/i686-elf-tools-linux.zip
+          mkdir -p i686-elf-tools-linux
+          unzip i686-elf-tools-linux.zip -d i686-elf-tools-linux
+          chmod +x i686-elf-tools-linux/bin/*
+
+      - name: Cache NNG build
+        uses: actions/cache@v4
         with:
-          name: nng
           path: nng/build
+          key: ${{ runner.os }}-nng-build-v1
 
-      - name: Debug extracted files
+      - name: Add i686-elf toolchain to PATH
+        run: echo "${{ github.workspace }}/i686-elf-tools-linux/bin" >> $GITHUB_PATH
+
+      # ARCH goes through the environment rather than into the script text.
+      # inputs.architectures comes from the caller, so a downstream project
+      # controls the matrix values; interpolating them straight into a
+      # `run:` block would let a caller inject shell. The allowlist check
+      # is the second layer.
+      - name: Build
+        env:
+          ARCH: ${{ matrix.architecture }}
         run: |
-          echo "Current directory structure:"
-          ls -la
-          echo "Checking if i686-elf-tools-linux directory exists:"
-          [ -d "i686-elf-tools-linux" ] && echo "Directory exists" || echo "Directory does not exist"
-          if [ -d "i686-elf-tools-linux/bin" ]; then
-            echo "bin directory content:"
-            ls -la i686-elf-tools-linux/bin
-          else 
-            echo "bin directory doesn't exist"
-            find . -type f -name "i686-elf-gcc" | head -n 5
+          case "$ARCH" in
+            x86|arm|riscv) ;;
+            *) echo "::error::unsupported architecture '$ARCH'"; exit 1 ;;
+          esac
+          if [ "$ARCH" = "x86" ]; then
+            i686-elf-gcc --version > /dev/null
           fi
+          make "$ARCH"
 
-      - name: Set up toolchain
-        run: |
-          chmod +x i686-elf-tools-linux/bin/* || echo "Failed to chmod, checking if binaries exist"
-          echo "Toolchain directory contents:"
-          ls -la i686-elf-tools-linux/bin || echo "Unable to list bin directory"
-          export PATH="${{ github.workspace }}/i686-elf-tools-linux/bin:$PATH"
-          which i686-elf-gcc || echo "i686-elf-gcc not found in PATH"
-
-      - name: Build for ${{ matrix.architecture }}
-        run: |
-          export PATH="${{ github.workspace }}/i686-elf-tools-linux/bin:$PATH"
-          make ${{ matrix.architecture }}
-
-      - name: Run tests for ${{ matrix.architecture }}
+      # run_tests.sh returns a meaningful status, so it is not wrapped in
+      # `|| true` here. Discarding it would waste the only end-to-end gate
+      # this workflow has.
+      - name: Run QEMU tests
         if: inputs.run-tests && matrix.architecture == 'x86'
         run: |
-          export PATH="${{ github.workspace }}/i686-elf-tools-linux/bin:$PATH"
           chmod +x ./scripts/run_tests.sh
           ./scripts/run_tests.sh
-          
+
+      # `with:` values are not shell, so interpolating the matrix value
+      # here carries no injection risk. Only `run:` blocks need the env
+      # indirection.
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: lughos-${{ matrix.architecture }}-build
-          path: |
-            build/${{ matrix.architecture }}
+          path: build/${{ matrix.architecture }}
+
+      - name: Upload test logs
+        if: always() && matrix.architecture == 'x86'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-x86
+          path: test-logs/
+          if-no-files-found: ignore
 
   analysis:
     if: inputs.run-analysis
@@ -164,12 +185,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cppcheck clang-tidy xsltproc
-          
+          sudo apt-get install -y cppcheck clang-tidy
+
+      # clang-tidy stays advisory. Without a compilation database on
+      # freestanding kernel sources it is too noisy to gate on, and its
+      # exported fixes are uploaded for a human to read.
       - name: Run static analysis with clang-tidy (CERT C)
         run: |
           mkdir -p reports
@@ -178,6 +202,9 @@ jobs:
             -export-fixes=reports/clang-tidy-fixes.yaml \
             -- -Iinclude || true
 
+      # services/*/*.c, not a hand-listed set. The old list named scheduler,
+      # storage and update only, so services/auditor and services/workflow
+      # were never analysed.
       - name: Run static analysis with Cppcheck
         run: |
           mkdir -p reports
@@ -185,16 +212,23 @@ jobs:
             --xml --xml-version=2 \
             -Iinclude \
             kernel/*.c kernel/*/*.c kernel/*/*/*.c \
-            services/scheduler/*.c services/storage/*.c services/update/*.c \
+            services/*/*.c \
             2> reports/cppcheck-report.xml
 
-      - name: Generate HTML report from Cppcheck XML
+      # Replaces an xsltproc call against
+      # /usr/share/cppcheck/cppcheck-htmlreport.xslt, which has not shipped
+      # with cppcheck for years. That step failed on every run and took the
+      # job with it, so the job could only fail cosmetically and never for a
+      # finding. --fail-on error makes the result mean something.
+      - name: Generate report and gate on error-severity findings
         run: |
-          xsltproc --stringparam title "LughOS Cppcheck Report" \
-            /usr/share/cppcheck/cppcheck-htmlreport.xslt \
-            reports/cppcheck-report.xml > reports/cppcheck-report.html
+          python3 scripts/cppcheck_report.py reports/cppcheck-report.xml \
+            --html reports/cppcheck-report.html \
+            --title "LughOS Cppcheck Report" \
+            --fail-on error
 
       - name: Upload analysis reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: static-analysis-reports
@@ -206,7 +240,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -216,49 +250,75 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-i386 qemu-system-arm qemu-system-riscv64
-          
-      - name: Setup directory structure
-        run: |
-          mkdir -p build/x86
-          mkdir -p build/arm
-          mkdir -p build/riscv
-          cp -R artifacts/lughos-x86-build/* build/x86/ || true
-          cp -R artifacts/lughos-arm-build/* build/arm/ || true
-          cp -R artifacts/lughos-riscv-build/* build/riscv/ || true
 
-      - name: Generate test report
+      # Every step below iterates the architectures the caller asked for,
+      # read from the environment rather than interpolated into the script.
+      # A requested architecture with no artifact is a failure: the previous
+      # version hid it behind `cp ... || true` and then wrote a cross into a
+      # markdown file that nothing acted on.
+      - name: Collect build artifacts
+        env:
+          ARCHITECTURES: ${{ inputs.architectures }}
+        run: |
+          missing=0
+          for arch in $(printf '%s' "$ARCHITECTURES" | jq -r '.[]'); do
+            case "$arch" in
+              x86|arm|riscv) ;;
+              *) echo "::error::unsupported architecture '$arch'"; exit 1 ;;
+            esac
+            mkdir -p "build/${arch}"
+            if [ -d "artifacts/lughos-${arch}-build" ]; then
+              cp -R "artifacts/lughos-${arch}-build/." "build/${arch}/"
+            else
+              echo "::error::no build artifact for ${arch}"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo "${missing} architecture(s) produced no build artifact"
+            exit 1
+          fi
+
+      - name: Run unit tests
+        env:
+          ARCHITECTURES: ${{ inputs.architectures }}
         run: |
           mkdir -p test-logs
-          echo "# LughOS Test Results" > test-logs/test-summary.md
-          echo "## Build Status" >> test-logs/test-summary.md
-          
-          # List all built architectures
-          echo "### Architectures built:" >> test-logs/test-summary.md
-          for arch in x86 arm riscv; do
-            if [ -d "build/${arch}" ] && [ -f "build/${arch}/lughos.bin" ]; then
-              echo "- ✅ ${arch}" >> test-logs/test-summary.md
-            else
-              echo "- ❌ ${arch}" >> test-logs/test-summary.md
+          chmod +x ./scripts/run_unit_tests.sh
+          failed=0
+          {
+            echo "# LughOS Test Results"
+            echo ""
+            echo "| Architecture | Kernel | Unit tests |"
+            echo "|---|---|---|"
+          } > test-logs/test-summary.md
+
+          for arch in $(printf '%s' "$ARCHITECTURES" | jq -r '.[]'); do
+            if [ ! -f "build/${arch}/lughos.bin" ]; then
+              echo "| ${arch} | ❌ missing | skipped |" >> test-logs/test-summary.md
+              failed=$((failed + 1))
+              continue
             fi
-          done
-          
-          # Run tests if possible for each architecture
-          for arch in x86 arm riscv; do
-            if [ -f "build/${arch}/lughos.bin" ]; then
-              echo "Running tests for ${arch}..."
-              chmod +x ./scripts/run_unit_tests.sh
-              ./scripts/run_unit_tests.sh ${arch} || true
-              
-              # Add test report to summary if it exists
-              if [ -f "test-logs/unit_test_report_${arch}.md" ]; then
-                echo "" >> test-logs/test-summary.md
-                echo "## ${arch} Test Results" >> test-logs/test-summary.md
-                cat test-logs/unit_test_report_${arch}.md >> test-logs/test-summary.md
-              fi
+            # run_unit_tests.sh exits non-zero on a real failure. The old
+            # `|| true` here threw that away.
+            if ./scripts/run_unit_tests.sh "${arch}"; then
+              echo "| ${arch} | ✅ | ✅ |" >> test-logs/test-summary.md
+            else
+              echo "| ${arch} | ✅ | ❌ |" >> test-logs/test-summary.md
+              failed=$((failed + 1))
             fi
           done
 
+          cat test-logs/test-summary.md >> "$GITHUB_STEP_SUMMARY"
+          cat test-logs/test-summary.md
+
+          if [ "${failed}" -ne 0 ]; then
+            echo "::error::${failed} architecture(s) failed"
+            exit 1
+          fi
+
       - name: Upload test reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-reports
