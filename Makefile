@@ -50,7 +50,8 @@ COMMON_CFLAGS = -ffreestanding -nostdlib -Wall -Wextra -Werror -Wformat=2 -Wform
          -fdata-sections -ffunction-sections \
          -Wshadow -Wpointer-arith -Wcast-align -Wstrict-prototypes -Wredundant-decls \
          -Wconversion -Wno-unused-parameter \
-         -DDEBUG -D_FORTIFY_SOURCE=2 -Iinclude -Ilib/nng/include -O2
+         -DDEBUG -D_FORTIFY_SOURCE=2 -Iinclude -Ilib/nng/include -O2 \
+         -MMD -MP
 
 X86_CFLAGS = $(COMMON_CFLAGS) $(X86_ARCH_FLAGS)
 # ARM target: QEMU `versatilepb` board has an ARM926EJ-S (ARMv5TE).
@@ -105,6 +106,7 @@ SCHEDULER_SRC = services/scheduler/round_robin.c services/scheduler/utils.c
 STORAGE_SRC = services/storage/storage.c services/storage/transactions.c
 UPDATE_SRC = services/update/update.c services/update/sandbox.c
 AUDITOR_SRC = services/auditor/exporter.c kernel/ring_buffer.c
+WORKFLOW_SRC = services/workflow/workflow.c
 X86_BOOT_SRC = kernel/arch/x86/boot_x86.S kernel/arch/x86/enter_user_mode.S \
                kernel/arch/x86/gdt_load.S kernel/arch/x86/isr_stubs.S \
                kernel/arch/x86/context_switch.S
@@ -131,13 +133,13 @@ USER_ARM_OBJS = $(USER_LIB_SRC:.c=.user.arm.o) $(USER_TEST_SRC:.c=.user.arm.o) $
 USER_RISCV_OBJS = $(USER_LIB_SRC:.c=.user.riscv.o) $(USER_TEST_SRC:.c=.user.riscv.o) $(USER_RISCV_BOOT_SRC:.S=.user.riscv.o) $(USER_RISCV_SYSCALL_SRC:.S=.user.riscv.o)
 
 X86_OBJS = $(KERNEL_SRC:.c=.x86.o) $(X86_SPECIFIC_SRC:.c=.x86.o) $(SCHEDULER_SRC:.c=.x86.o) $(STORAGE_SRC:.c=.x86.o) \
-           $(UPDATE_SRC:.c=.x86.o) $(AUDITOR_SRC:.c=.x86.o) \
+           $(UPDATE_SRC:.c=.x86.o) $(AUDITOR_SRC:.c=.x86.o) $(WORKFLOW_SRC:.c=.x86.o) \
            $(X86_BOOT_SRC:.S=.x86.o) $(X86_SYSCALL_SRC:.S=.x86.o) $(SYSCALL_SRC:.c=.x86.o)
 ARM_OBJS = $(KERNEL_SRC:.c=.arm.o) $(ARM_SPECIFIC_SRC:.c=.arm.o) $(SCHEDULER_SRC:.c=.arm.o) $(STORAGE_SRC:.c=.arm.o) \
-           $(UPDATE_SRC:.c=.arm.o) $(AUDITOR_SRC:.c=.arm.o) \
+           $(UPDATE_SRC:.c=.arm.o) $(AUDITOR_SRC:.c=.arm.o) $(WORKFLOW_SRC:.c=.arm.o) \
            $(ARM_BOOT_SRC:.S=.arm.o) $(ARM_SYSCALL_SRC:.S=.arm.o) $(SYSCALL_SRC:.c=.arm.o)
 RISCV_OBJS = $(KERNEL_SRC:.c=.riscv.o) $(RISCV_SPECIFIC_SRC:.c=.riscv.o) $(SCHEDULER_SRC:.c=.riscv.o) $(STORAGE_SRC:.c=.riscv.o) \
-           $(UPDATE_SRC:.c=.riscv.o) $(AUDITOR_SRC:.c=.riscv.o) \
+           $(UPDATE_SRC:.c=.riscv.o) $(AUDITOR_SRC:.c=.riscv.o) $(WORKFLOW_SRC:.c=.riscv.o) \
            $(RISCV_BOOT_SRC:.S=.riscv.o) $(RISCV_SYSCALL_SRC:.S=.riscv.o) $(SYSCALL_SRC:.c=.riscv.o)
 
 X86_OUT = build/x86
@@ -163,6 +165,21 @@ endif
 ifeq ($(RISCV_TOOLCHAIN_AVAILABLE),1)
   ALL_TARGETS += riscv
 endif
+
+# Header dependency tracking. -MMD -MP (in COMMON_CFLAGS) makes the
+# compiler emit a .d file beside each object listing the headers it
+# included; -include pulls those in as extra prerequisites.
+#
+# Without this, editing a header rebuilt nothing. `make arm` after a
+# change to include/memory.h reused the stale kernel/mm/memory.arm.o and
+# reported success, so a _Static_assert added to catch a bad memory map
+# did not fire until `make clean`. Every header-based guard in the tree
+# was only as good as the last full rebuild.
+#
+# The `-` prefix keeps the first build (no .d files yet) quiet.
+ALL_DEP_FILES = $(X86_OBJS:.o=.d) $(ARM_OBJS:.o=.d) $(RISCV_OBJS:.o=.d) \
+                $(USER_X86_OBJS:.o=.d) $(USER_ARM_OBJS:.o=.d) $(USER_RISCV_OBJS:.o=.d)
+-include $(ALL_DEP_FILES)
 
 all: $(ALL_TARGETS)
 	@if [ -z "$(ALL_TARGETS)" ]; then \
@@ -304,6 +321,7 @@ $(RISCV_USER_OBJ): $(RISCV_USER_BIN)
 
 clean:
 	rm -rf build *.o kernel/*.o kernel/*/*.o kernel/*/*/*.o services/*/*.o user/*.o user/*/*.o
+	rm -f *.d kernel/*.d kernel/*/*.d kernel/*/*/*.d services/*/*.d user/*.d user/*/*.d
 
 run: x86
 	@echo "Running LughOS x86 in QEMU..."

@@ -10,8 +10,23 @@
  */
 #define MEMORY_REGION_KERNEL     0x100000  // Kernel code (read-only)
 #define MEMORY_REGION_DATA       0x300000  // Kernel data (read-write)
-#define MEMORY_REGION_HEAP_START 0x400000  // Heap start address
-#define MEMORY_REGION_HEAP_END   0x800000  // Heap end address (4MB heap)
+
+/* Heap bounds come from the single memory map in include/memory.h.
+ *
+ * They used to be defined here as [0x400000, 0x800000), which is the user
+ * program's address range. The two definitions never appeared in the same
+ * file, so nothing made the collision visible. The assertion below is what
+ * makes a repeat a build failure instead of a corrupted user task. */
+#define MEMORY_REGION_HEAP_START MM_HEAP_START
+#define MEMORY_REGION_HEAP_END   MM_HEAP_END
+
+_Static_assert(MEMORY_REGION_HEAP_END <= MM_USER_LOAD_BASE ||
+               MEMORY_REGION_HEAP_START >= MM_USER_REGION_END,
+               "kernel heap overlaps the user program region — the heap "
+               "would hand out the user binary's own memory");
+
+_Static_assert(MEMORY_REGION_HEAP_END > MEMORY_REGION_HEAP_START,
+               "kernel heap bounds are inverted or empty");
 
 /* Memory permission flags */
 #define USER_READ       0x04
@@ -187,55 +202,17 @@ void free_memory(void* ptr) {
     log_message(LOG_WARNING, "Attempted to free unallocated memory at 0x%x\n", (unsigned int)(uintptr_t)ptr);
 }
 
-/**
- * Allocate a page directory for a new address space
- * 
- * @return Pointer to the new page directory, or NULL on failure
- * 
- * Complies with:
- * - NASA Power of Ten Rule 3: All allocation at initialization time
- * - JPL Rule 14: Check return values
+/* allocate_page_dir() and map_user_space() were removed here.
+ *
+ * Both reported success without doing their job. map_user_space logged
+ * "Mapped user space: 0x%x-0x%x" and returned 0 while creating no page
+ * table entry at all, so its only caller copied into unmapped memory and
+ * took a section translation fault. allocate_page_dir handed out a 4 KB
+ * block that was never freed and never used as a page directory.
+ *
+ * A stub that returns an error is honest. A stub that returns success is
+ * a defect with a comment attached, because every caller is written to
+ * trust it. Real address-space construction needs the L2 page table work
+ * that arm_section_set_ap() in kernel/mm/arm_mmu.c is the first step of;
+ * these two will come back when there is something behind them.
  */
-uint32_t* allocate_page_dir(void) {
-    // Allocate memory for page directory (4KB aligned)
-    uint32_t* page_dir = (uint32_t*)alloc_memory(4096);
-    if (!page_dir) {
-        log_message(LOG_ERROR, "Failed to allocate page directory");
-        return NULL;
-    }
-    
-    // Initialize page directory with kernel mappings
-    // In a real system, this would map the kernel's address space
-    // into every process's address space for syscalls
-    
-    log_message(LOG_INFO, "Allocated page directory at 0x%x", (unsigned int)(uintptr_t)page_dir);
-    return page_dir;
-}
-
-/**
- * Map a range of virtual addresses to physical memory with specified permissions
- * 
- * @param page_dir Page directory to modify
- * @param start_addr Starting virtual address
- * @param end_addr Ending virtual address
- * @param permissions Permission flags (USER_READ, USER_WRITE, etc.)
- * @return 0 on success, -1 on failure
- * 
- * Complies with:
- * - SEI CERT ARR30-C: Do not form or use out-of-bounds pointers
- * - JPL Rule 15: Validate parameters
- */
-int map_user_space(uint32_t* page_dir, uint32_t start_addr, uint32_t end_addr, uint32_t permissions) {
-    if (!page_dir || end_addr <= start_addr) {
-        log_message(LOG_ERROR, "Invalid parameters for mapping user space");
-        return -1;
-    }
-    
-    // In a real system, this would create page table entries
-    // and map virtual addresses to physical memory pages
-    // with the specified permissions
-    
-    log_message(LOG_INFO, "Mapped user space: 0x%x-0x%x with permissions 0x%x", 
-                (unsigned int)start_addr, (unsigned int)end_addr, (unsigned int)permissions);
-    return 0;
-}

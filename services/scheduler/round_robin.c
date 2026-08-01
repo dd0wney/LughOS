@@ -108,7 +108,12 @@ static int rr_get_state(void *buf, size_t *size) {
 static int rr_set_state(void *buf, size_t size) {
     if (!buf || size < sizeof(int)) return -1;
     uint8_t *p = (uint8_t *)buf;
-    int cursor;
+    /* Initialised even though the loop below writes every byte of it.
+     * cppcheck cannot follow the byte-wise write through the cast and
+     * reports uninitvar at the read on the next line. The initialiser
+     * costs nothing, the loop overwrites it, and defensive
+     * initialisation is what the JPL rules ask for anyway. */
+    int cursor = 0;
     int i;
     for (i = 0; i < (int)sizeof(int); i++)
         ((uint8_t *)&cursor)[i] = p[i];

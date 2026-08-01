@@ -107,19 +107,23 @@ int execute_update(struct update_state *state) {
     assert(state != NULL); /* JPL Rule 16 */
     log_message(LOG_INFO, "Starting update transaction %u for %s",
                 (unsigned int)state->transaction_id, state->tx.path);
-    int result = apply_update(&state->tx);
+
+    /* apply_update advances state->status through the pipeline stages as
+     * each workflow step runs, and leaves it on the terminal value. Do not
+     * overwrite it here — the stage it stopped at is the diagnostic. */
+    int result = apply_update(state);
+
     if (result == 0) {
-        state->status = UPDATE_STATUS_COMPLETE;
         log_message(LOG_INFO, "Update transaction %u completed successfully",
                     (unsigned int)state->transaction_id);
         if (state->requires_reboot) {
             log_message(LOG_WARNING, "System reboot required to complete update");
         }
-    } else {
-        state->status = UPDATE_STATUS_ERROR;
-        log_message(LOG_ERROR, "Update transaction %u failed",
-                    (unsigned int)state->transaction_id);
+        return 0;
     }
+
+    log_message(LOG_ERROR, "Update transaction %u failed at stage %d",
+                (unsigned int)state->transaction_id, (int)state->status);
     return result;
 }
 

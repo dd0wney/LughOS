@@ -53,17 +53,18 @@ jobs:
           sudo make install
           sudo ldconfig
 
-      - name: Upload toolchain artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: toolchain
-          path: i686-elf-tools-linux
+      # No artifact upload. This job exists to populate the two caches that
+      # the build matrix restores from, and `needs: setup` is what orders
+      # them. The toolchain used to be uploaded as an artifact and
+      # downloaded per architecture, which lost the executable bit and the
+      # libexec tree that holds cc1.
 
-      - name: Upload NNG artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: nng
-          path: nng/build
+      - name: Verify the cached toolchain can compile
+        run: |
+          echo 'int main(void){return 0;}' > /tmp/probe.c
+          ./i686-elf-tools-linux/bin/i686-elf-gcc \
+            -ffreestanding -nostdlib -c /tmp/probe.c -o /tmp/probe.o
+          echo "i686-elf toolchain is functional before the matrix starts"
 
   build:
     needs: setup
@@ -87,52 +88,75 @@ jobs:
           which arm-none-eabi-gcc || echo "arm-none-eabi-gcc not found" 
           which riscv64-linux-gnu-gcc || echo "riscv64-linux-gnu-gcc not found"
 
-      - name: Download toolchain
-        uses: actions/download-artifact@v4
+      # The toolchain travels by cache, not by artifact.
+      #
+      # actions/upload-artifact does not preserve the executable bit, and
+      # the round trip did not reconstruct the toolchain's libexec tree, so
+      # every x86 build failed with:
+      #     i686-elf-gcc: error trying to exec 'cc1': No such file or file
+      # The `chmod +x bin/*` below only ever covered bin/, never
+      # libexec/gcc/i686-elf/*/cc1 where the real compiler lives.
+      #
+      # actions/cache preserves permissions and the full tree, and this is
+      # what build.yml already does successfully. `needs: setup` guarantees
+      # the cache is populated before this job runs; the install step is the
+      # fallback for a cache miss.
+      - name: Cache i686-elf toolchain
+        id: cache-i686-elf-toolchain
+        uses: actions/cache@v4
         with:
-          name: toolchain
           path: i686-elf-tools-linux
+          key: ${{ runner.os }}-i686-elf-tools-linux-7.1.0
 
-      - name: Download NNG
-        uses: actions/download-artifact@v4
+      - name: Install i686-elf-gcc
+        if: steps.cache-i686-elf-toolchain.outputs.cache-hit != 'true'
+        run: |
+          wget https://github.com/lordmilko/i686-elf-tools/releases/download/7.1.0/i686-elf-tools-linux.zip
+          mkdir -p i686-elf-tools-linux
+          unzip i686-elf-tools-linux.zip -d i686-elf-tools-linux
+          chmod +x i686-elf-tools-linux/bin/*
+
+      - name: Cache NNG build
+        id: cache-nng-build
+        uses: actions/cache@v4
         with:
-          name: nng
           path: nng/build
+          key: ${{ runner.os }}-nng-build-v1
 
-      - name: Debug extracted files
-        run: |
-          echo "Current directory structure:"
-          ls -la
-          echo "Checking if i686-elf-tools-linux directory exists:"
-          [ -d "i686-elf-tools-linux" ] && echo "Directory exists" || echo "Directory does not exist"
-          if [ -d "i686-elf-tools-linux/bin" ]; then
-            echo "bin directory content:"
-            ls -la i686-elf-tools-linux/bin
-          else 
-            echo "bin directory doesn't exist"
-            find . -type f -name "i686-elf-gcc" | head -n 5
-          fi
+      - name: Add i686-elf toolchain to PATH
+        run: echo "${{ github.workspace }}/i686-elf-tools-linux/bin" >> $GITHUB_PATH
 
-      - name: Set up toolchain
+      # Compile something rather than only checking that a file exists.
+      # `which i686-elf-gcc` succeeded on every broken run, because the
+      # driver was present and only its cc1 backend was missing. A real
+      # compile is the smallest check that can tell those two apart.
+      - name: Verify the i686-elf toolchain can compile
+        if: matrix.architecture == 'x86'
         run: |
-          chmod +x i686-elf-tools-linux/bin/* || echo "Failed to chmod, checking if binaries exist"
-          echo "Toolchain directory contents:"
-          ls -la i686-elf-tools-linux/bin || echo "Unable to list bin directory"
-          export PATH="${{ github.workspace }}/i686-elf-tools-linux/bin:$PATH"
-          which i686-elf-gcc || echo "i686-elf-gcc not found in PATH"
+          echo 'int main(void){return 0;}' > /tmp/probe.c
+          i686-elf-gcc -ffreestanding -nostdlib -c /tmp/probe.c -o /tmp/probe.o
+          echo "i686-elf toolchain is functional"
 
       - name: Build for ${{ matrix.architecture }}
-        run: |
-          export PATH="${{ github.workspace }}/i686-elf-tools-linux/bin:$PATH"
-          make ${{ matrix.architecture }}
+        run: make ${{ matrix.architecture }}
 
+      # `|| true` used to discard the result. run_tests.sh now returns a
+      # meaningful status, so throwing it away would waste the only test
+      # gate this workflow has.
       - name: Run tests for ${{ matrix.architecture }}
         if: matrix.architecture == 'x86'
         run: |
-          export PATH="${{ github.workspace }}/i686-elf-tools-linux/bin:$PATH"
           chmod +x ./scripts/run_tests.sh
-          ./scripts/run_tests.sh || true
-          
+          ./scripts/run_tests.sh
+
+      - name: Upload test logs
+        if: always() && matrix.architecture == 'x86'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-x86
+          path: test-logs/
+          if-no-files-found: ignore
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -156,23 +180,40 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-i386 qemu-system-arm
 
-      - name: Generate test report
+      # This step used to write a tick or a cross into a markdown file and
+      # then exit 0 either way, so a missing architecture was recorded and
+      # never acted on. It now fails when an expected build is absent, and
+      # the summary goes to the job summary where it is actually read.
+      - name: Verify every architecture produced a build
         run: |
           mkdir -p test-reports
-          echo "# LughOS Test Results" > test-reports/test-summary.md
-          echo "## Build Status" >> test-reports/test-summary.md
-          
-          # List all built architectures
-          echo "### Architectures built:" >> test-reports/test-summary.md
+          missing=0
+          {
+            echo "# LughOS Build Results"
+            echo ""
+            echo "| Architecture | Build |"
+            echo "|---|---|"
+          } > test-reports/test-summary.md
+
           for arch in x86 arm riscv; do
             if [ -d "artifacts/lughos-${arch}-build" ]; then
-              echo "- ✅ ${arch}" >> test-reports/test-summary.md
+              echo "| ${arch} | ✅ |" >> test-reports/test-summary.md
             else
-              echo "- ❌ ${arch}" >> test-reports/test-summary.md
+              echo "| ${arch} | ❌ missing |" >> test-reports/test-summary.md
+              missing=$((missing + 1))
             fi
           done
 
+          cat test-reports/test-summary.md >> "$GITHUB_STEP_SUMMARY"
+          cat test-reports/test-summary.md
+
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::${missing} architecture(s) produced no build artifact"
+            exit 1
+          fi
+
       - name: Upload test reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-reports

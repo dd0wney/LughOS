@@ -506,6 +506,57 @@ void auditor_init(void) {
         (unsigned int)sizeof(auditor_record_t));
 }
 
+/* Phase 4 F4: workflow step boundary. Same field-reuse shape as
+ * emit_fault_record — four 32-bit values packed little-endian into
+ * payload_hash with a bounded loop. */
+static void emit_workflow_record(uint64_t workflow_id,
+                                 uint32_t owner_task_id,
+                                 uint32_t step_index,
+                                 uint32_t status,
+                                 uint32_t done_count,
+                                 int      step_rv,
+                                 uint8_t  event) {
+    auditor_record_t rec;
+    init_record(&rec, AUDITOR_REC_WORKFLOW);
+    rec.priority   = 0;
+    rec.src_domain = (current_task != NULL)
+                     ? (uint8_t)(current_task->domain & 0xFFu)
+                     : 0u;
+    rec.protocol   = event;
+    /* step_index is bounded by WORKFLOW_MAX_STEPS (8), so the truncation
+     * to the 8-bit channel_id field cannot lose information. */
+    rec.channel_id = (uint8_t)(step_index & 0xFFu);
+    rec.operation  = (uint32_t)(workflow_id & 0xFFFFFFFFull);
+    rec.checksum   = (uint32_t)((workflow_id >> 32) & 0xFFFFFFFFull);
+
+    uint32_t vals[4];
+    vals[0] = owner_task_id;
+    vals[1] = status;
+    vals[2] = done_count;
+    vals[3] = (uint32_t)step_rv;
+    uint32_t i;
+    for (i = 0; i < 4u; i++) {
+        rec.payload_hash[i * 4u + 0u] = (uint8_t)(vals[i]);
+        rec.payload_hash[i * 4u + 1u] = (uint8_t)(vals[i] >> 8);
+        rec.payload_hash[i * 4u + 2u] = (uint8_t)(vals[i] >> 16);
+        rec.payload_hash[i * 4u + 3u] = (uint8_t)(vals[i] >> 24);
+    }
+    tlm_write_bytes(&rec, sizeof(rec));
+}
+
+void auditor_workflow(uint64_t workflow_id,
+                      uint32_t owner_task_id,
+                      uint32_t step_index,
+                      uint32_t status,
+                      uint32_t done_count,
+                      int      step_rv,
+                      uint8_t  event) {
+    if (!auditor_enabled)
+        return;
+    emit_workflow_record(workflow_id, owner_task_id, step_index,
+                         status, done_count, step_rv, event);
+}
+
 void auditor_tick(void) {
     if (!auditor_enabled)
         return;

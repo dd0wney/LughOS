@@ -15,23 +15,11 @@
  */
 void memory_init(void);
 
-/**
- * Allocate a page directory for a new address space.
- * 
- * @return Pointer to the new page directory, or NULL on failure
- */
-uint32_t* allocate_page_dir(void);
-
-/**
- * Map a range of virtual addresses to physical memory with specified permissions.
- * 
- * @param page_dir Page directory to modify
- * @param start_addr Starting virtual address
- * @param end_addr Ending virtual address
- * @param permissions Permission flags (USER_READ, USER_WRITE, etc.)
- * @return 0 on success, -1 on failure
- */
-int map_user_space(uint32_t* page_dir, uint32_t start_addr, uint32_t end_addr, uint32_t permissions);
+/* allocate_page_dir() and map_user_space() are deliberately absent.
+ * Both existed as stubs that returned success while doing nothing, which
+ * made every caller's error check meaningless. See the note in
+ * kernel/mm/memory.c. Use arm_section_set_ap() below for the one form of
+ * mapping change LughOS can currently make. */
 
 /**
  * Load a user program from binary data to memory.
@@ -43,6 +31,39 @@ int map_user_space(uint32_t* page_dir, uint32_t start_addr, uint32_t end_addr, u
  * @return 0 on success, -1 on failure
  */
 int load_user_program(void* binary_data, size_t size, uint32_t* entry_point, uint32_t* stack_pointer);
+
+/* ── Physical memory map (Phase 4 F5) ──────────────────────────────
+ *
+ * Every fixed region is named here, in one place, so an overlap shows up
+ * as a compile-time failure rather than as corrupted memory at run time.
+ * memory.c carries a _Static_assert that enforces the disjointness.
+ *
+ * This exists because the kernel heap used to start at MM_USER_LOAD_BASE.
+ * The heap and the user program occupied the same addresses. The first
+ * user IPC that got far enough to allocate an nng_msg_t overwrote the
+ * user program's entry code, and the task then prefetch-aborted at pc=0.
+ * Both constants were correct in isolation and fatal together, which is
+ * exactly the failure a single named map prevents.
+ */
+#define MM_USER_LOAD_BASE   0x400000u   /* user binary load address       */
+#define MM_USER_STACK_TOP   0x700000u   /* user stack top, grows downward */
+#define MM_USER_REGION_END  0x800000u   /* end of user-accessible sections */
+
+#if defined(__riscv)
+/* RISC-V RAM begins at 0x80000000 and the kernel image at 0x80100000, so
+ * a low heap address is not merely overlapping there, it is not RAM. */
+#define MM_HEAP_START       0x80800000u
+#define MM_HEAP_END         0x80900000u
+#else
+#define MM_HEAP_START       0x800000u
+#define MM_HEAP_END         0x900000u
+#endif
+
+/* Fixed-size block allocator over [MM_HEAP_START, MM_HEAP_END).
+ * Declared here rather than as an ad-hoc extern in each consumer.
+ * Returns NULL when no block of a suitable size class is free. */
+void* alloc_memory(size_t size);
+void  free_memory(void* ptr);
 
 /* Memory permission flags */
 #define USER_READ       0x04

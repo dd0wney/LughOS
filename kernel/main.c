@@ -9,6 +9,7 @@
 #include "capabilities.h"
 #include "domain_graph.h"
 #include "transactions.h"
+#include "workflow.h"
 #include "update.h"
 #include "sandbox.h"
 #include "memory.h"
@@ -228,21 +229,41 @@ void test_update_system(void) {
     
     // Create update state
     struct update_state update;
-    
+
     // Initialize the update transaction
     const char *test_path = "/services/test_update.bin";
-    if (init_update_transaction(&update, UPDATE_TYPE_SERVICE, test_path, 
+
+    /* Register the target path as a checkpointable buffer. Without it the
+     * first pipeline step fails on an unknown key and the test proves
+     * nothing about the four steps behind it. There is no filesystem in
+     * Phase 3/4, so a registered buffer is what a "path" resolves to. */
+    static uint8_t target_buf[256];
+    for (size_t i = 0; i < sizeof(target_buf); i++) {
+        target_buf[i] = 0xA5u;   /* pre-update contents */
+    }
+    if (storage_register_buffer(test_path, target_buf, sizeof(target_buf)) != 0) {
+        log_message(LOG_ERROR, "Update test setup FAIL: register_buffer\n");
+        return;
+    }
+
+    if (init_update_transaction(&update, UPDATE_TYPE_SERVICE, test_path,
                               test_binary, test_size, hash) == 0) {
-        
+
         // Execute the update
         int result = execute_update(&update);
-        
-        if (result == 0) {
-            log_message(LOG_INFO, "Update test completed successfully\n");
+
+        /* All five steps must commit. UPDATE_STATUS_COMPLETE is the only
+         * acceptable terminal stage — a rollback here would mean a step
+         * regressed, and ERROR would mean the undo chain also failed. */
+        if (result == 0 && update.status == UPDATE_STATUS_COMPLETE) {
+            log_message(LOG_INFO,
+                "Update test PASS: all 5 workflow steps committed\n");
         } else {
-            log_message(LOG_ERROR, "Update test failed\n");
+            log_message(LOG_ERROR,
+                "Update test FAIL: rv=%d stage=%d\n",
+                result, (int)update.status);
         }
-        
+
         // Clean up
         cleanup_update_transaction(&update);
     } else {
@@ -1140,6 +1161,446 @@ subtest3:
     log_message(LOG_INFO, "Storage tests: %d/3 passed\n", pass);
 }
 
+/* ── Memory map regression test (Phase 4 F5) ────────────────────────
+ *
+ * Guards the kernel-heap / user-program overlap that corrupted the user
+ * task's entry code on the first successful user IPC. memory.c holds a
+ * _Static_assert that makes a reintroduction a build failure. This test
+ * covers what the static assertion cannot: that the allocator actually
+ * hands out addresses from the region the map claims. */
+static void test_memory_map(void) {
+    log_message(LOG_INFO, "Testing memory map...\n");
+    int pass = 0;
+
+    /* ── Subtest 1: the heap must not intersect the user region ──── */
+    {
+        const int disjoint = (MM_HEAP_END <= MM_USER_LOAD_BASE) ||
+                             (MM_HEAP_START >= MM_USER_REGION_END);
+        if (disjoint) {
+            log_message(LOG_INFO,
+                "Memory map test 1 PASS: heap [0x%x,0x%x) disjoint from user [0x%x,0x%x)\n",
+                (unsigned int)MM_HEAP_START, (unsigned int)MM_HEAP_END,
+                (unsigned int)MM_USER_LOAD_BASE, (unsigned int)MM_USER_REGION_END);
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Memory map test 1 FAIL: heap [0x%x,0x%x) OVERLAPS user [0x%x,0x%x)\n",
+                (unsigned int)MM_HEAP_START, (unsigned int)MM_HEAP_END,
+                (unsigned int)MM_USER_LOAD_BASE, (unsigned int)MM_USER_REGION_END);
+        }
+    }
+
+    /* ── Subtest 2: no allocation may land in the user region ─────
+     *
+     * One block from each size class. The size class table is what the
+     * IPC path draws from, so this exercises the same blocks that
+     * overwrote the user program. */
+    {
+        static const size_t sizes[4] = { 64u, 256u, 1024u, 4096u };
+        void *p[4];
+        int ok = 1;
+        int i;
+
+        for (i = 0; i < 4; i++) {
+            p[i] = alloc_memory(sizes[i]);
+            if (p[i] == NULL) {
+                log_message(LOG_ERROR,
+                    "Memory map test 2 FAIL: alloc_memory(%u) returned NULL\n",
+                    (unsigned int)sizes[i]);
+                ok = 0;
+                continue;
+            }
+            const uintptr_t a = (uintptr_t)p[i];
+            if (a >= MM_USER_LOAD_BASE && a < MM_USER_REGION_END) {
+                log_message(LOG_ERROR,
+                    "Memory map test 2 FAIL: alloc_memory(%u) = 0x%x is inside user space\n",
+                    (unsigned int)sizes[i], (unsigned int)a);
+                ok = 0;
+            }
+            if (a < MM_HEAP_START || a >= MM_HEAP_END) {
+                log_message(LOG_ERROR,
+                    "Memory map test 2 FAIL: alloc_memory(%u) = 0x%x is outside the heap\n",
+                    (unsigned int)sizes[i], (unsigned int)a);
+                ok = 0;
+            }
+        }
+        for (i = 0; i < 4; i++) {
+            free_memory(p[i]);   /* NULL is ignored by free_memory */
+        }
+
+        if (ok) {
+            log_message(LOG_INFO,
+                "Memory map test 2 PASS: 4/4 allocations inside the heap, none in user space\n");
+            pass++;
+        }
+    }
+
+    /* ── Subtest 3: the region table actually discriminates ───────
+     *
+     * The point of deriving regions from linker symbols is that the
+     * validator stops being decorative. Before that, the hardcoded table
+     * described a layout no target had: on ARM the kernel sat outside
+     * every region, so the check returned true for everything; on x86
+     * the kernel's .bss sat inside a write-denied "Kernel code" region,
+     * so writes to kernel globals were refused and strcpy silently
+     * produced empty strings.
+     *
+     * A denial logs a LOG_WARNING. The two warnings this subtest
+     * provokes are expected, and their absence is the failure. */
+    {
+        extern char _text_start[];
+        static uint8_t bss_probe;   /* .bss — must be writable */
+
+        const int text_write_denied =
+            !security_validate_memory_access((void*)_text_start, 4u, true);
+        const int text_read_allowed =
+            security_validate_memory_access((void*)_text_start, 4u, false);
+        const int bss_write_allowed =
+            security_validate_memory_access((void*)&bss_probe, 1u, true);
+        const int null_read_denied =
+            !security_validate_memory_access((void*)0x4u, 4u, false);
+
+        if (text_write_denied && text_read_allowed &&
+            bss_write_allowed && null_read_denied) {
+            log_message(LOG_INFO,
+                "Memory map test 3 PASS: text RO, bss RW, null guard denies\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR,
+                "Memory map test 3 FAIL: text_w_denied=%d text_r_ok=%d "
+                "bss_w_ok=%d null_denied=%d\n",
+                text_write_denied, text_read_allowed,
+                bss_write_allowed, null_read_denied);
+        }
+    }
+
+    log_message(LOG_INFO, "Memory map tests: %d/3 passed\n", pass);
+}
+
+/* ── Sandbox staging test (Phase 4 F5) ──────────────────────────────
+ *
+ * sandbox_apply used to map two magic addresses (0x900000, 0xA00000)
+ * through map_user_space and then memcpy into them. map_user_space
+ * created no mapping and returned 0 anyway, so the copy took a section
+ * translation fault:
+ *     DABORT pc=0x000192BC va=0x00900000 dfsr=0x05
+ * Reaching this code at all required the update pipeline to get past the
+ * checkpoint step, which it never did, so the fault stayed hidden. */
+static void test_sandbox_staging(void) {
+    log_message(LOG_INFO, "Testing sandbox staging...\n");
+    int pass = 0;
+
+    /* ── Subtest 1: a well-formed image stages without faulting ──── */
+    {
+        static uint8_t img[512];
+        size_t i;
+        img[0] = 0x7Fu; img[1] = 'E'; img[2] = 'L'; img[3] = 'F';
+        for (i = 4u; i < sizeof(img); i++) {
+            img[i] = (uint8_t)(i & 0xFFu);
+        }
+        if (sandbox_apply(img, sizeof(img))) {
+            log_message(LOG_INFO,
+                "Sandbox test 1 PASS: 512-byte image staged, no fault\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR, "Sandbox test 1 FAIL: rejected a valid image\n");
+        }
+    }
+
+    /* ── Subtest 2: a non-ELF image is rejected ───────────────────── */
+    {
+        static uint8_t bad[128];
+        size_t i;
+        for (i = 0u; i < sizeof(bad); i++) {
+            bad[i] = 0xFFu;   /* no ELF magic */
+        }
+        if (!sandbox_apply(bad, sizeof(bad))) {
+            log_message(LOG_INFO, "Sandbox test 2 PASS: non-ELF image rejected\n");
+            pass++;
+        } else {
+            log_message(LOG_ERROR, "Sandbox test 2 FAIL: accepted a non-ELF image\n");
+        }
+    }
+
+    /* ── Subtest 3: an image too large for the staging area is
+     *              rejected rather than overrunning it ───────────── */
+    {
+        if (!sandbox_apply((const uint8_t *)"\x7F" "ELF", SANDBOX_STAGE_SIZE + 1u)) {
+            log_message(LOG_INFO,
+                "Sandbox test 3 PASS: oversized image rejected (limit %u bytes)\n",
+                (unsigned int)SANDBOX_STAGE_SIZE);
+            pass++;
+        } else {
+            log_message(LOG_ERROR, "Sandbox test 3 FAIL: accepted an oversized image\n");
+        }
+    }
+
+    log_message(LOG_INFO, "Sandbox tests: %d/3 passed\n", pass);
+}
+
+/* ── Workflow engine test (Phase 4 F4) ──────────────────────────────
+ *
+ * Five subtests over the durable-workflow engine. The step callbacks
+ * append to a shared trace, so a subtest can assert the exact order the
+ * run and undo callbacks fired in — not just the terminal status. A
+ * status assertion alone would pass even if the undo chain ran forwards.
+ *
+ * Trace encoding: +N = step N ran, -N = step N was undone. Indices are
+ * 1-based so the sign stays meaningful for the first step.
+ *
+ * wf_fail_step / wf_fail_undo steer the fault injection. A callback whose
+ * 1-based index matches returns -1 instead of 0. wf_reset() clears both
+ * between subtests so injection never leaks forward. */
+
+#define WF_TRACE_MAX 16u
+
+static int      wf_trace[WF_TRACE_MAX];
+static uint32_t wf_trace_len;
+static int      wf_fail_step;  /* 1-based step whose run returns -1; 0 = none */
+static int      wf_fail_undo;  /* 1-based step whose undo returns -1; 0 = none */
+
+static void wf_reset(void) {
+    uint32_t i;
+    for (i = 0u; i < WF_TRACE_MAX; i++) {
+        wf_trace[i] = 0;
+    }
+    wf_trace_len = 0u;
+    wf_fail_step = 0;
+    wf_fail_undo = 0;
+}
+
+/* Bounded append — NASA Power of Ten rule 2. A trace overrun is itself a
+ * test failure, because the length check in wf_trace_is() will not match. */
+static void wf_mark(int value) {
+    if (wf_trace_len < WF_TRACE_MAX) {
+        wf_trace[wf_trace_len] = value;
+        wf_trace_len++;
+    }
+}
+
+static int wf_do(int idx)     { wf_mark(idx);  return (idx == wf_fail_step) ? -1 : 0; }
+static int wf_undo_do(int idx){ wf_mark(-idx); return (idx == wf_fail_undo) ? -1 : 0; }
+
+static int wf_run_1(void *ctx)  { (void)ctx; return wf_do(1); }
+static int wf_run_2(void *ctx)  { (void)ctx; return wf_do(2); }
+static int wf_run_3(void *ctx)  { (void)ctx; return wf_do(3); }
+static int wf_undo_1(void *ctx) { (void)ctx; return wf_undo_do(1); }
+static int wf_undo_2(void *ctx) { (void)ctx; return wf_undo_do(2); }
+static int wf_undo_3(void *ctx) { (void)ctx; return wf_undo_do(3); }
+
+#define WF_TEST_STEPS 3u
+
+static const workflow_step_t wf_test_steps[WF_TEST_STEPS] = {
+    { "one",   wf_run_1, wf_undo_1 },
+    { "two",   wf_run_2, wf_undo_2 },
+    { "three", wf_run_3, wf_undo_3 },
+};
+
+/* Exact-match compare of the trace against an expected sequence. */
+static int wf_trace_is(const int *expect, uint32_t len) {
+    uint32_t i;
+    if (wf_trace_len != len) {
+        return 0;
+    }
+    for (i = 0u; i < len; i++) {
+        if (wf_trace[i] != expect[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void wf_log_fail(int n, int rv, const workflow_t *wf) {
+    log_message(LOG_ERROR,
+        "Workflow test %d FAIL: rv=%d status=%d done=%u trace_len=%u\n",
+        n, rv, (int)wf->status, (unsigned int)wf->done_count,
+        (unsigned int)wf_trace_len);
+}
+
+static void test_workflow(void) {
+    log_message(LOG_INFO, "Testing workflow engine...\n");
+    int pass = 0;
+
+    /* ── Subtest 1: every step succeeds → COMMITTED, no undo ───────
+     *
+     * Also checks slot accounting as a delta against the live baseline,
+     * not against 0 — an earlier workflow may still hold a slot. A leak
+     * here would silently exhaust the table for every later caller. */
+    {
+        wf_reset();
+        const uint32_t base_active = workflow_active_count();
+        workflow_t *wf = workflow_begin(wf_test_steps, WF_TEST_STEPS, NULL);
+        if (wf == NULL) {
+            log_message(LOG_ERROR, "Workflow test 1 FAIL: begin returned NULL\n");
+        } else {
+            const uint32_t claimed = workflow_active_count();
+            const int expect[] = { 1, 2, 3 };
+            int rv = workflow_run(wf);
+            const int core_ok = (rv == 0 && wf->status == WF_STATUS_COMMITTED &&
+                                 wf->done_count == WF_TEST_STEPS &&
+                                 wf_trace_is(expect, 3u));
+            workflow_release(wf);
+            const uint32_t freed = workflow_active_count();
+
+            if (core_ok && claimed == base_active + 1u && freed == base_active) {
+                log_message(LOG_INFO,
+                    "Workflow test 1 PASS: 3/3 ran, COMMITTED, slot freed\n");
+                pass++;
+            } else {
+                log_message(LOG_ERROR,
+                    "Workflow test 1 FAIL: core_ok=%d base=%u claimed=%u freed=%u\n",
+                    core_ok, (unsigned int)base_active,
+                    (unsigned int)claimed, (unsigned int)freed);
+            }
+        }
+    }
+
+    /* ── Subtest 2: step 2 fails → step 1 undone, ROLLED_BACK ────── */
+    {
+        wf_reset();
+        wf_fail_step = 2;
+        workflow_t *wf = workflow_begin(wf_test_steps, WF_TEST_STEPS, NULL);
+        if (wf == NULL) {
+            log_message(LOG_ERROR, "Workflow test 2 FAIL: begin returned NULL\n");
+        } else {
+            /* Step 3 never runs. Step 2 is NOT undone — its run did not
+             * complete, so it owns no effect to reverse. */
+            const int expect[] = { 1, 2, -1 };
+            int rv = workflow_run(wf);
+            if (rv != 0 && wf->status == WF_STATUS_ROLLED_BACK &&
+                wf_trace_is(expect, 3u)) {
+                log_message(LOG_INFO,
+                    "Workflow test 2 PASS: step 2 failed, step 1 undone\n");
+                pass++;
+            } else {
+                wf_log_fail(2, rv, wf);
+            }
+            workflow_release(wf);
+        }
+    }
+
+    /* ── Subtest 3: undo order is the reverse of the run order ───── */
+    {
+        wf_reset();
+        wf_fail_step = 3;
+        workflow_t *wf = workflow_begin(wf_test_steps, WF_TEST_STEPS, NULL);
+        if (wf == NULL) {
+            log_message(LOG_ERROR, "Workflow test 3 FAIL: begin returned NULL\n");
+        } else {
+            /* Two completed steps to reverse. {-2,-1} and not {-1,-2} is
+             * the whole point of this subtest. */
+            const int expect[] = { 1, 2, 3, -2, -1 };
+            int rv = workflow_run(wf);
+            if (rv != 0 && wf->status == WF_STATUS_ROLLED_BACK &&
+                wf_trace_is(expect, 5u)) {
+                log_message(LOG_INFO,
+                    "Workflow test 3 PASS: undo ran 2 then 1 (reverse order)\n");
+                pass++;
+            } else {
+                wf_log_fail(3, rv, wf);
+            }
+            workflow_release(wf);
+        }
+    }
+
+    /* ── Subtest 4: a failing undo escalates to FAILED, not silence ─ */
+    {
+        wf_reset();
+        wf_fail_step = 3;
+        wf_fail_undo = 1;
+        workflow_t *wf = workflow_begin(wf_test_steps, WF_TEST_STEPS, NULL);
+        if (wf == NULL) {
+            log_message(LOG_ERROR, "Workflow test 4 FAIL: begin returned NULL\n");
+        } else {
+            /* The chain must still attempt every undo. Undo 1 reports a
+             * failure, so the terminal status is FAILED, not ROLLED_BACK. */
+            const int expect[] = { 1, 2, 3, -2, -1 };
+            int rv = workflow_run(wf);
+            if (rv != 0 && wf->status == WF_STATUS_FAILED &&
+                wf_trace_is(expect, 5u)) {
+                log_message(LOG_INFO,
+                    "Workflow test 4 PASS: failed undo → WF_STATUS_FAILED\n");
+                pass++;
+            } else {
+                wf_log_fail(4, rv, wf);
+            }
+            workflow_release(wf);
+        }
+    }
+
+    /* ── Subtest 5: recovery reverses cleanly and frees the slot ──── */
+    {
+        wf_reset();
+        const uint32_t base_active = workflow_active_count();
+        workflow_t *wf = workflow_begin(wf_test_steps, WF_TEST_STEPS, NULL);
+        if (wf == NULL) {
+            log_message(LOG_ERROR, "Workflow test 5 FAIL: begin returned NULL\n");
+        } else {
+            /* Simulate an abort after two steps completed: the slot stays
+             * RUNNING with done_count=2, exactly as it would if a fault
+             * killed the owner between step 2 and step 3. */
+            wf->done_count = 2u;
+            wf->status     = WF_STATUS_RUNNING;
+
+            const int expect[] = { -2, -1 };
+            int rv = workflow_recover();
+            /* Policy: a clean reversal returns the slot to the pool, so
+             * the status is IDLE and the active count is back to base. */
+            if (rv == 0 && wf_trace_is(expect, 2u) &&
+                wf->status == WF_STATUS_IDLE &&
+                workflow_active_count() == base_active) {
+                log_message(LOG_INFO,
+                    "Workflow test 5 PASS: recovery reversed 2 steps, slot freed\n");
+                pass++;
+            } else {
+                log_message(LOG_ERROR,
+                    "Workflow test 5 FAIL: rv=%d status=%d active=%u base=%u trace_len=%u\n",
+                    rv, (int)wf->status,
+                    (unsigned int)workflow_active_count(),
+                    (unsigned int)base_active, (unsigned int)wf_trace_len);
+            }
+        }
+    }
+
+    /* ── Subtest 6: recovery KEEPS a slot it could not reverse ────── */
+    {
+        wf_reset();
+        wf_fail_undo = 1;   /* step 1's undo reports a failure */
+        const uint32_t base_active = workflow_active_count();
+        workflow_t *wf = workflow_begin(wf_test_steps, WF_TEST_STEPS, NULL);
+        if (wf == NULL) {
+            log_message(LOG_ERROR, "Workflow test 6 FAIL: begin returned NULL\n");
+        } else {
+            wf->done_count = 2u;
+            wf->status     = WF_STATUS_RUNNING;
+
+            /* Both undos are still attempted — stopping at the first
+             * failure would leave step 2's effect in place unrecorded. */
+            const int expect[] = { -2, -1 };
+            int rv = workflow_recover();
+            /* Policy: an unreversible workflow keeps its slot as evidence,
+             * so the count stays one above base and the status is FAILED. */
+            if (rv != 0 && wf_trace_is(expect, 2u) &&
+                wf->status == WF_STATUS_FAILED &&
+                workflow_active_count() == base_active + 1u) {
+                log_message(LOG_INFO,
+                    "Workflow test 6 PASS: failed recovery kept slot as evidence\n");
+                pass++;
+            } else {
+                log_message(LOG_ERROR,
+                    "Workflow test 6 FAIL: rv=%d status=%d active=%u base=%u trace_len=%u\n",
+                    rv, (int)wf->status,
+                    (unsigned int)workflow_active_count(),
+                    (unsigned int)base_active, (unsigned int)wf_trace_len);
+            }
+            /* Release explicitly so the table is clean for the boot path. */
+            workflow_release(wf);
+        }
+    }
+
+    log_message(LOG_INFO, "Workflow tests: %d/6 passed\n", pass);
+}
+
 /**
  * @brief Initialize the kernel and its subsystems
  * 
@@ -1243,6 +1704,19 @@ void kmain(void) {
      * even though every other task references it as parent. */
     task_emit_kernel_create_event();
 
+    /* Phase 4 F4: reverse any workflow left in a non-terminal status.
+     * Must run after auditor_init so the reversal records reach the
+     * telemetry stream, and before any subsystem starts a new workflow.
+     *
+     * With the current RAM-only checkpoint storage this finds nothing on a
+     * cold boot — the workflow table is zeroed by then. It becomes real
+     * crash recovery unchanged once a persistent storage_ops_t backend
+     * exists. See the scope note in include/workflow.h. */
+    if (workflow_recover() != 0) {
+        log_message(LOG_ERROR,
+            "Workflow recovery could not reverse every workflow\n");
+    }
+
     // Initialize scheduler
     rr_scheduler.init(NULL);
 
@@ -1257,6 +1731,9 @@ void kmain(void) {
     test_mmu_protection();
     test_fault_telemetry();
     test_transactional_storage();
+    test_workflow();
+    test_memory_map();
+    test_sandbox_staging();
     test_nng_patterns();
 
     // Test the update system

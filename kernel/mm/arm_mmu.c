@@ -91,8 +91,14 @@
     (((addr) & 0xFFF00000u) | ((ap) << 10) | (0u << 5) | 0x2u)
 
 /* 4096 entries × 4 bytes = 16 KB. Alignment must match TTBR0's
- * 16 KB requirement on ARMv5. Lives in BSS, zero-initialised. */
+ * 16 KB requirement on ARMv5. Lives in BSS, zero-initialised.
+ *
+ * Guarded: every user of this table is inside an __arm__ block, so on
+ * x86 and RISC-V it was an unused static and -Werror=unused-variable
+ * failed the build for both targets. */
+#ifdef __arm__
 static uint32_t l1_page_table[4096] __attribute__((aligned(16384)));
+#endif
 
 #ifdef __arm__
 
@@ -195,6 +201,16 @@ void arm_mmu_init(void) {
     for (i = 4u; i < 8u; i++) {
         l1_page_table[i] = SECTION_DESCRIPTOR(i * 0x100000u, AP_USER_RW);
     }
+    /* Section 8 ([0x800000–0x8FFFFF)): the kernel heap that alloc_memory
+     * carves blocks from. Kernel-only, so a user task cannot reach the
+     * allocator's blocks — which it could when the heap sat inside the
+     * user-RW sections 4–7. Bounds come from MM_HEAP_START/MM_HEAP_END
+     * in include/memory.h; the loop below covers whatever range those
+     * name, so moving the heap does not silently unmap it. */
+    for (i = (MM_HEAP_START >> 20); i < ((MM_HEAP_END + 0xFFFFFu) >> 20); i++) {
+        l1_page_table[i] = SECTION_DESCRIPTOR(i * 0x100000u, AP_KERNEL_ONLY);
+    }
+
     /* Map device window 0x10100000–0x101FFFFF (one section covers
      * VIC, SP804, PL011 UART0, PL011 UART1). Kernel-only. */
     l1_page_table[0x101] = SECTION_DESCRIPTOR(0x10100000u, AP_KERNEL_ONLY);

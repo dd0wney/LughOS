@@ -14,6 +14,19 @@ void security_init(void);
 void security_init_memory_protection(void);
 
 /**
+ * Build the protected-region table from the linker's section symbols.
+ *
+ * Called by security_init(). The regions describe the real link layout
+ * (_text_start, _rodata_end, _data_start, _bss_end) plus the heap and
+ * user bounds from memory.h, rather than a hardcoded map that no
+ * architecture matched.
+ *
+ * Until this runs, security_validate_memory_access() allows everything —
+ * the string and memory helpers run long before a region table can exist.
+ */
+void security_regions_init(void);
+
+/**
  * Verify memory regions for security violations
  * 
  * @return true if memory layout is secure

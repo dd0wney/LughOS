@@ -48,6 +48,7 @@ REC_CHAN_CONNECT = 6
 REC_TASK_EXIT    = 7
 REC_DOMAIN_EDGE  = 8
 REC_FAULT        = 9  # prefetch/data abort — no-op for graph topology
+REC_WORKFLOW     = 10 # workflow step boundary — no-op for graph topology
 
 
 @dataclass
@@ -130,6 +131,14 @@ def apply_record(state: GraphState, rec: dict) -> None:
         # F3: fault records annotate task nodes but don't mutate graph topology.
         # Graph-level fault annotation (e.g. marking a task node "faulted") is
         # deferred to Phase 5. Explicit branch documents the intent.
+        pass
+
+    elif t == REC_WORKFLOW:
+        # F4: workflow records describe a temporal chain over one task, not an
+        # edge between tasks, so they leave the topology alone. The natural
+        # graph rendering — a workflow node with STEP edges — is a different
+        # graph from the task/channel/domain one this script builds. Deferred
+        # to Phase 5. Explicit branch documents the intent.
         pass
 
 
