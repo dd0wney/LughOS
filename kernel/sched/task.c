@@ -196,14 +196,26 @@ int create_task(task_t* spec) {
  * x86 frame would mirror this (push ebp/edi/esi/ebx + ret addr). Both
  * arches share the same `saved_sp` field; the per-arch shape lives in
  * context_switch.S. */
+/* Build the synthetic stack frame a never-yet-run task is resumed from.
+ *
+ * The layout MUST mirror what the target architecture's context switch
+ * pops, register for register. It used to build the ARM frame on every
+ * architecture. On x86 the switch popped four zero words as ebp/edi/esi/ebx
+ * and then `ret`-ed into a fifth zero word, so the first yield to a fresh
+ * task jumped to address 0:
+ *
+ *   EXCEPTION 6 (Invalid Opcode) err=0x0 eip=0x00000003 cs=0x08
+ *
+ * The x86 build did not compile at all, so nothing ever ran this path. */
 void task_setup_initial_frame(task_t* t, task_entry_fn entry) {
     if (t == NULL || t->kernel_stack_top == 0u || entry == NULL) return;
     uint32_t* sp = (uint32_t*)(uintptr_t)t->kernel_stack_top;
-    /* Build the frame in descending order. The ARM switch's
-     * `pop {r4-r11, lr}` loads in ascending register order from
-     * ascending memory addresses, so lr must be at the HIGH end
-     * and r4 at the LOW end. */
-    *--sp = (uint32_t)(uintptr_t)entry; /* lr */
+
+#if defined(__arm__)
+    /* arm_context_switch ends in `pop {r4-r11, lr}`, which loads in
+     * ascending register order from ascending addresses. lr therefore
+     * sits at the HIGH end of the frame and r4 at the LOW end. */
+    *--sp = (uint32_t)(uintptr_t)entry; /* lr  */
     *--sp = 0u;                          /* r11 */
     *--sp = 0u;                          /* r10 */
     *--sp = 0u;                          /* r9  */
@@ -212,6 +224,27 @@ void task_setup_initial_frame(task_t* t, task_entry_fn entry) {
     *--sp = 0u;                          /* r6  */
     *--sp = 0u;                          /* r5  */
     *--sp = 0u;                          /* r4  */
+#elif defined(__i386__)
+    /* x86_context_switch ends in `popl ebp; popl edi; popl esi; popl ebx;
+     * ret`. Each pop reads upward from ESP, and `ret` then consumes one
+     * more word as the return address. So the entry point sits at the
+     * HIGH end and ebp at the LOW end — five words, not nine. */
+    *--sp = (uint32_t)(uintptr_t)entry; /* return address consumed by ret */
+    *--sp = 0u;                          /* ebx */
+    *--sp = 0u;                          /* esi */
+    *--sp = 0u;                          /* edi */
+    *--sp = 0u;                          /* ebp */
+#else
+    /* No context switch exists for this architecture yet (RISC-V has no
+     * context_switch.S). Leave saved_sp at 0 — task_yield already refuses
+     * to switch to a task with no saved frame, and refusing is far better
+     * than resuming onto a frame no switch code agrees with. */
+    (void)entry;
+    (void)sp;
+    t->saved_sp = 0u;
+    return;
+#endif
+
     t->saved_sp = (uint32_t)(uintptr_t)sp;
 }
 
