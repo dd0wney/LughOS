@@ -89,12 +89,24 @@ int execute_update(struct update_state *state);
 void cleanup_update_transaction(struct update_state *state);
 
 /**
- * Apply an update with proper validation and rollback capability.
- * 
- * @param tx Basic transaction structure
+ * Apply an update as a durable workflow (see include/workflow.h).
+ *
+ * Runs checkpoint, verify, sandbox, test and install as five workflow
+ * steps. If any step fails, the engine reverses the completed steps in
+ * the opposite order and every undo result is checked.
+ *
+ * Takes the update_state rather than the bare update_tx so each step can
+ * advance state->status as it runs. On return, status names the stage the
+ * pipeline reached:
+ *   UPDATE_STATUS_COMPLETE  every step committed
+ *   UPDATE_STATUS_ROLLBACK  a step failed and every undo succeeded
+ *   UPDATE_STATUS_ERROR     an undo also failed, or the workflow never
+ *                           started; system state is uncertain
+ *
+ * @param state Update state; state->tx must be populated
  * @return 0 on success, -1 on failure
  */
-int apply_update(struct update_tx *tx);
+int apply_update(struct update_state *state);
 
 /**
  * Process IPC message for update command.
@@ -106,17 +118,28 @@ int apply_update(struct update_tx *tx);
 int process_update_ipc(uint32_t operation, const char *message);
 
 /**
- * Roll back an update if it fails.
- * 
+ * Roll back an update by restoring its checkpoint.
+ *
+ * The workflow engine drives the undo chain on the normal path, so this
+ * exists for direct callers. It returns a status rather than void: the
+ * previous void signature made a failed restore indistinguishable from a
+ * successful one, which is the defect this change repairs.
+ *
  * @param tx Update transaction to roll back
+ * @return 0 when the restore succeeded, -1 otherwise
  */
-void rollback_update(struct update_tx *tx);
+int rollback_update(struct update_tx *tx);
 
 /**
- * Commit an update after successful validation.
- * 
+ * Install an update after successful validation.
+ *
+ * Does NOT remove the checkpoint. The checkpoint is the only thing that
+ * makes a rollback possible, so the caller discards it after the whole
+ * workflow commits, never alongside the install.
+ *
  * @param tx Update transaction to commit
+ * @return 0 when the install succeeded, -1 otherwise
  */
-void commit_update(struct update_tx *tx);
+int commit_update(struct update_tx *tx);
 
 #endif /* UPDATE_H */
