@@ -10,6 +10,8 @@
 #include "lugh.h"
 #include "console.h"
 #include "crypto.h"
+#include "security.h" /* own prototypes — this file previously declared none */
+#include "memory.h"   /* MM_HEAP_START / MM_USER_LOAD_BASE — the shared memory map */
 
 /**
  * Initialize hardware memory protection
@@ -51,6 +53,10 @@ void security_init(void) {
     log_message(LOG_INFO, "Enabling address space randomization\n");
     // ASLR implementation would go here
     #endif
+    /* Build the region table from the link layout before anything relies
+     * on write protection. Until this runs the validator fails open, so
+     * the earlier it happens the smaller that window is. */
+    security_regions_init();
     security_init_memory_protection();
     if (!security_verify_memory_layout()) {
         log_message(LOG_ERROR, "SECURITY VIOLATION: Insecure memory layout detected\n");
@@ -96,20 +102,116 @@ typedef struct {
  */
 #define MAX_PROTECTED_REGIONS 8
 
+/* Section boundaries emitted by kernel/linker_{x86,arm,riscv}.ld.
+ *
+ * Declared as arrays so the symbol's ADDRESS is the value — taking &sym or
+ * using a plain char would read the memory at that address instead. */
+extern char _text_start[],   _text_end[];
+extern char _rodata_start[], _rodata_end[];
+extern char _data_start[],   _data_end[];
+extern char _bss_start[],    _bss_end[];
+
 /**
- * Memory protection regions
- * These define which memory regions have which access permissions
+ * Memory protection regions, built at init from the real link layout.
+ *
+ * This table used to be a hardcoded const array describing a memory map
+ * that no architecture actually had:
+ *
+ *   { 0x00100000, 0x00200000, ... write_allowed=false, "Kernel code" }
+ *
+ * On x86 the kernel loads at 1 MB, so .data and .bss sat inside that
+ * write-denied range. Every memcpy into a kernel global was refused,
+ * which made strlen return 0 and strcpy produce an empty string — the
+ * checkpoint table silently registered blank keys and every lookup
+ * missed. On ARM the kernel loads at 0x10000, inside no declared region
+ * at all, so the loop matched nothing and the validator returned true
+ * unconditionally. The same table was corrupting on one target and inert
+ * on the other, and correct on neither.
+ *
+ * Deriving the bounds from linker symbols means the table cannot drift
+ * from the layout again: move a section and the regions move with it.
+ *
+ * NASA Power of Ten rule 2: fixed-size array, bounded loop, no growth.
  */
-static const mem_region_t protected_regions[MAX_PROTECTED_REGIONS] = {
-    { 0x00000000, 0x00000FFF, false, false, false, "Null pointer guard" },
-    { 0x00100000, 0x00200000, true,  false, true,  "Kernel code" },
-    { 0x00200000, 0x00300000, true,  true,  false, "Kernel data" },
-    { 0x00300000, 0x00400000, true,  true,  false, "Kernel heap" },
-    { 0x00400000, 0x00800000, true,  true,  false, "User heap" },
-    { 0x00800000, 0x00900000, true,  true,  false, "File cache" },
-    { 0x00900000, 0x00A00000, true,  false, false, "Read-only config" },
-    { 0x00A00000, 0x01000000, true,  true,  false, "User space" }
-};
+static mem_region_t protected_regions[MAX_PROTECTED_REGIONS];
+static uint32_t     protected_region_count = 0u;
+
+/* Append a region if there is room and the bounds are sane. A zero-length
+ * or inverted range is dropped rather than stored, because a region with
+ * end < start silently matches nothing in the overlap test below. */
+static void region_add(uintptr_t start, uintptr_t end,
+                       bool read_ok, bool write_ok, bool exec_ok,
+                       const char* name) {
+    if (protected_region_count >= MAX_PROTECTED_REGIONS) {
+        log_message(LOG_ERROR,
+            "security: region table full, dropping '%s'\n", name);
+        return;
+    }
+    if (end < start) {
+        log_message(LOG_ERROR,
+            "security: region '%s' has end < start, dropped\n", name);
+        return;
+    }
+    protected_regions[protected_region_count].start_addr    = start;
+    protected_regions[protected_region_count].end_addr      = end;
+    protected_regions[protected_region_count].read_allowed  = read_ok;
+    protected_regions[protected_region_count].write_allowed = write_ok;
+    protected_regions[protected_region_count].exec_allowed  = exec_ok;
+    protected_regions[protected_region_count].region_name   = name;
+    protected_region_count++;
+}
+
+/**
+ * Build the protected-region table from the link layout.
+ *
+ * Call once, early, before anything relies on write protection. Until it
+ * runs, protected_region_count is 0 and every access validates — the
+ * string and memory helpers are used during early boot, well before a
+ * region table can exist, so failing open before init is required rather
+ * than merely convenient.
+ */
+void security_regions_init(void) {
+    protected_region_count = 0u;
+
+    /* Null pointer guard. Kept below any real kernel address on all three
+     * targets (ARM starts at 0x10000, x86 at 0x100000, RISC-V at
+     * 0x80100000), so it never shadows a legitimate section. */
+    region_add(0x0u, 0xFFFu, false, false, false, "Null pointer guard");
+
+    /* Kernel text and rodata: readable and executable, never writable.
+     * This is the one region that actually protects something — a write
+     * here is a genuine defect or an attack. */
+    region_add((uintptr_t)_text_start, (uintptr_t)_rodata_end - 1u,
+               true, false, true, "Kernel text+rodata");
+
+    /* Kernel data and BSS: readable and writable, not executable.
+     * .data and .bss are adjacent in all three linker scripts, so one
+     * region covers both. */
+    region_add((uintptr_t)_data_start, (uintptr_t)_bss_end - 1u,
+               true, true, false, "Kernel data+bss");
+
+    /* Block allocator arena — see the memory map in include/memory.h. */
+    region_add(MM_HEAP_START, MM_HEAP_END - 1u,
+               true, true, false, "Kernel heap");
+
+    /* User program image and stack. Writable from kernel mode: the loader
+     * copies the binary in, and the syscall layer writes the message
+     * struct back. Hardware AP bits are what stop USER mode reaching
+     * kernel memory — see arm_mmu_init. */
+    region_add(MM_USER_LOAD_BASE, MM_USER_REGION_END - 1u,
+               true, true, true, "User space");
+
+    log_message(LOG_INFO,
+        "security: %u regions from link layout "
+        "(text=0x%x-0x%x data=0x%x-0x%x heap=0x%x-0x%x)\n",
+        (unsigned int)protected_region_count,
+        (unsigned int)(uintptr_t)_text_start,
+        (unsigned int)((uintptr_t)_rodata_end - 1u),
+        (unsigned int)(uintptr_t)_data_start,
+        (unsigned int)((uintptr_t)_bss_end - 1u),
+        (unsigned int)MM_HEAP_START,
+        (unsigned int)(MM_HEAP_END - 1u));
+}
 
 /**
  * Validate a memory access to ensure it's within bounds and has proper permissions
@@ -139,8 +241,9 @@ bool security_validate_memory_access(void* addr, size_t size, bool write) {
     // Calculate end address with overflow protection
     uintptr_t end_address = address + size - (size > 0 ? 1 : 0);
     
-    // Check against protected regions
-    for (int i = 0; i < MAX_PROTECTED_REGIONS; i++) {
+    /* Check against protected regions. Before security_regions_init runs,
+     * the count is 0 and this loop is a no-op — see the note there. */
+    for (uint32_t i = 0; i < protected_region_count; i++) {
         const mem_region_t* region = &protected_regions[i];
         
         // If memory range overlaps with this region
