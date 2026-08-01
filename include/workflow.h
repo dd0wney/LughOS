@@ -16,8 +16,30 @@
  * checkpoint slots behind it live in RAM only (services/storage/transactions.c
  * — "No persistence, lives only across a kernel boot"). So workflow_recover()
  * reverses a workflow that a fault or a failed step abandoned WITHIN one
- * session. It is not crash recovery across a power cycle. It becomes crash
- * recovery unchanged once a persistent storage_ops_t backend exists.
+ * session. It is not crash recovery across a power cycle.
+ *
+ * An earlier version of this comment said it "becomes crash recovery
+ * unchanged once a persistent storage_ops_t backend exists". That was
+ * wrong, and the correction matters more than the original claim:
+ *
+ *   - A persistent backend is NECESSARY and NOT SUFFICIENT. Nothing in
+ *     workflow.c reads or writes storage. The table is never saved, so
+ *     there would be nothing on disk for a restart to find.
+ *
+ *   - workflow_t holds `steps` and `ctx` as raw pointers. Neither means
+ *     anything after a restart. A restored table could not call its own
+ *     undo chain, because it would not know where the undo functions are.
+ *
+ * The remaining work therefore has a shape, and it is bigger than adding
+ * a backend:
+ *
+ *   1. a registry mapping a stable workflow type id to a step table, so a
+ *      restored workflow can rebind its steps by id rather than by address
+ *   2. a context a backend can serialise, replacing the void *ctx
+ *   3. saving the table through storage_backend() at each step boundary,
+ *      and reading it back in workflow_recover()
+ *
+ * Until all three exist, do not describe this engine as crash-recoverable.
  *
  * Complies with:
  * - NASA Power of Ten rule 2: every loop has a statically determinable bound
